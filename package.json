@@ -1,0 +1,23 @@
+{
+  "name": "agent-board",
+  "version": "0.1.0",
+  "description": "多個 Claude Code 對話的目標 / 待辦 / 目前在做什麼 追蹤面板（hooks + MCP + 網頁）",
+  "private": true,
+  "bin": {
+    "agent-board": "bin/agent-board.js"
+  },
+  "main": "src/server.js",
+  "files": [
+    "bin",
+    "src",
+    "public"
+  ],
+  "scripts": {
+    "start": "node bin/agent-board.js start",
+    "setup": "node bin/agent-board.js install",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

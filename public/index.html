@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Agent Board</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <h1>Agent Board</h1>
+        <span id="conn" class="conn" title="與 server 的即時連線">連線中…</span>
+      </div>
+      <div id="counters" class="counters" aria-live="polite"></div>
+      <div class="controls">
+        <div class="seg" role="tablist" aria-label="篩選">
+          <button data-filter="active" class="on">進行中</button>
+          <button data-filter="needs">等你處理</button>
+          <button data-filter="all">全部</button>
+        </div>
+        <input id="search" type="search" placeholder="搜尋目標、待辦、專案…" />
+        <label class="check"><input id="showArchived" type="checkbox" /> 顯示封存</label>
+        <button id="newCard" class="primary">＋ 手動新增卡片</button>
+      </div>
+    </header>
+
+    <section id="newCardForm" class="newcard" hidden>
+      <h2>手動新增卡片</h2>
+      <p class="hint">先把目標和待辦寫好，之後在 Claude Code 對話裡請 agent 用 <code>board_adopt</code> 接手這張卡片。</p>
+      <label>名稱 <input id="ncName" type="text" placeholder="例如：登入頁改版" /></label>
+      <label>目標 <textarea id="ncGoal" rows="2" placeholder="這個對話要替你達成什麼"></textarea></label>
+      <label>專案資料夾（選填） <input id="ncCwd" type="text" placeholder="C:/work/my-project" /></label>
+      <div class="row">
+        <button id="ncCreate" class="primary">建立</button>
+        <button id="ncCancel">取消</button>
+      </div>
+    </section>
+
+    <main id="grid" class="grid"></main>
+    <p id="empty" class="empty" hidden>
+      還沒有任何對話。安裝 hooks（<code>agent-board install</code>）後，開一個 Claude Code 對話就會自動出現在這裡。
+    </p>
+    <div id="toast" class="toast" role="status" hidden></div>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
