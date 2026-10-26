@@ -67,7 +67,7 @@ main { padding: 12px 16px 40px; max-width: 760px; margin: 0 auto; }
 }
 
 canvas { display: block; width: 100%; touch-action: none; }
-.car { aspect-ratio: 1 / 1.15; }
+.car { aspect-ratio: 1 / 1.2; }
 .gball { aspect-ratio: 1 / 1; max-width: 220px; }
 .chart { aspect-ratio: 2 / 1; margin-bottom: 8px; }
 
@@ -79,7 +79,6 @@ canvas { display: block; width: 100%; touch-action: none; }
 .readout .unit { margin-left: 4px; color: var(--muted); }
 
 .legend { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; font-size: 15px; }
-.sw { display: inline-block; width: 16px; height: 16px; border-radius: 4px; margin-left: 6px; }
 .muted { color: var(--muted); }
 .hint { margin: 0 4px 12px; }
 .small { font-size: 14px; }
@@ -119,7 +118,7 @@ table.metrics { width: 100%; border-collapse: collapse; font-size: 16px; }
 .metrics th, .metrics td { padding: 7px 4px; border-bottom: 1px solid var(--line); text-align: left; }
 .metrics th { color: var(--muted); font-weight: 500; }
 .metrics td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
-.tag { white-space: nowrap; display: inline-block; padding: 1px 8px; border-radius: 8px; color: #fff; font-size: 15px; }
+.tag { white-space: nowrap; display: inline-block; padding: 3px 11px; border-radius: 999px; color: #fff; font-size: 15px; font-weight: 800; }
 
 .settings label { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; }
 .settings label.check { flex-direction: row; align-items: center; gap: 10px; }

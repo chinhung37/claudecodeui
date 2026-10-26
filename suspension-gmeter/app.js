@@ -343,29 +343,43 @@
   // ---------- 判讀 ----------
   function judge(kind, value, baseKey) {
     // kind: 'roll' | 'pitch' | 'ride'
-    if (value == null) return { score: null, text: '資料不足', short: '資料不足' };
+    if (value == null) return { level: null, text: '資料不足', short: '資料不足' };
     const lowerIsHarder = kind !== 'ride';
     if (settings.useBaseline && baseline) {
       const base = baseKey(baseline.metrics);
       const pct = A.vsBaseline(value, base, lowerIsHarder);
-      if (pct == null) return { score: null, text: '基準無資料', short: '無基準' };
-      const score = Math.max(0, Math.min(1, 0.5 + pct / 60));
+      if (pct == null) return { level: null, text: '基準無資料', short: '無基準' };
       const near = Math.abs(pct) < 5;
+      const level = near ? 'mid' : pct > 0 ? 'hard' : 'soft';
       const dir = pct > 0 ? '硬' : '軟';
       const p = Math.abs(pct).toFixed(0) + '%';
-      return { score, text: near ? '與基準相近' : `比基準${dir} ${p}`, short: near ? '相近' : `${dir} ${p}` };
+      return { level, text: near ? '與基準相近' : `比基準${dir} ${p}`, short: near ? '相近' : `${dir} ${p}` };
     }
     const [soft, hard] = kind === 'roll' ? [settings.rollSoft, settings.rollHard]
       : kind === 'pitch' ? [settings.pitchSoft, settings.pitchHard]
         : [settings.rideSoft, settings.rideHard];
     const score = A.hardness(value, soft, hard);
-    const text = score < 0.34 ? '偏軟' : score > 0.66 ? '偏硬' : '適中';
-    return { score, text, short: text };
+    const level = score < 0.34 ? 'soft' : score > 0.66 ? 'hard' : 'mid';
+    return { level, text: LEVEL_TEXT[level], short: LEVEL_TEXT[level] };
   }
 
-  function scoreColor(score) {
-    if (score == null) return '#4a525d';
-    return `hsl(${210 - 210 * score} 70% 46%)`;
+  // 三段固定高對比色：藍 = 偏軟、綠 = 適中、紅 = 偏硬
+  const LEVEL_COLOR = { soft: '#1e88ff', mid: '#16c060', hard: '#ff3b30' };
+  const LEVEL_TEXT = { soft: '偏軟', mid: '適中', hard: '偏硬' };
+  function levelColor(j) { return LEVEL_COLOR[j.level] || '#4a525d'; }
+
+  // 色塊白字標籤；align 為錨點（left / center / right），y 為垂直中心
+  function drawPill(ctx, text, x, y, align, bg, fs) {
+    ctx.font = `800 ${fs}px system-ui, sans-serif`;
+    const tw = ctx.measureText(text).width;
+    const padX = fs * 0.55, h = fs * 1.55, w = tw + padX * 2;
+    const x0 = align === 'left' ? x : align === 'right' ? x - w : x - w / 2;
+    ctx.fillStyle = bg;
+    roundRect(ctx, x0, y - h / 2, w, h, h / 2);
+    ctx.fill();
+    ctx.fillStyle = '#ffffff';
+    ctx.textAlign = 'center';
+    ctx.fillText(text, x0 + w / 2, y + 1);
   }
 
   const EDGES = [
@@ -417,29 +431,27 @@
     for (const e of EDGES) edgeInfo[e.side] = { e, v: m ? m[e.key] : null, j: judge(e.kind, m ? m[e.key] : null, (b) => b[e.key]) };
 
     // 前後支撐條
-    const barT = H * 0.035;
+    const barT = H * 0.05;
     const drawHBar = (side, y, textY) => {
       const { e, v, j } = edgeInfo[side];
-      ctx.fillStyle = scoreColor(j.score);
-      roundRect(ctx, bx0 + 10, y, bx1 - bx0 - 20, barT, barT / 2);
+      ctx.fillStyle = levelColor(j);
+      roundRect(ctx, bx0 + 6, y, bx1 - bx0 - 12, barT, barT / 2);
       ctx.fill();
       ctx.fillStyle = '#e8ecf1';
       ctx.font = `700 ${fs}px system-ui, sans-serif`;
       ctx.fillText(`${e.label} ${e.desc} ${fmt(v, 2)}°/g`, W / 2, textY);
-      ctx.font = `600 ${fs}px system-ui, sans-serif`;
-      ctx.fillStyle = scoreColor(j.score);
-      ctx.fillText(j.text, W / 2, textY + fs * 1.25);
+      drawPill(ctx, j.text, W / 2, textY + fs * 1.55, 'center', levelColor(j), fs);
     };
-    drawHBar('front', by0 - barT - 6, H * 0.04);
+    drawHBar('front', by0 - barT - 6, H * 0.035);
     drawHBar('rear', by1 + 6, by1 + barT + 6 + fs * 1.1);
 
     // 左右支撐條
-    const wheelH = H * 0.15, wheelW = W * 0.075;
+    const wheelH = H * 0.15, wheelW = W * 0.09;
     const sideY0 = by0 + wheelH * 0.95 + 10, sideY1 = by1 - wheelH * 0.95 - 10;
     const drawVBar = (side) => {
       const { e, v, j } = edgeInfo[side];
       const x = side === 'left' ? bx0 - barT - 6 : bx1 + 6;
-      ctx.fillStyle = scoreColor(j.score);
+      ctx.fillStyle = levelColor(j);
       roundRect(ctx, x, sideY0, barT, sideY1 - sideY0, barT / 2);
       ctx.fill();
       const tx = side === 'left' ? x - 8 : x + barT + 8;
@@ -454,9 +466,7 @@
       ctx.fillStyle = '#e8ecf1';
       ctx.font = `700 ${fs}px system-ui, sans-serif`;
       ctx.fillText(`${fmt(v, 2)}°/g`, tx, cy + fs * 0.5);
-      ctx.fillStyle = scoreColor(j.score);
-      ctx.fillText(j.short, tx, cy + fs * 1.7);
-      ctx.textAlign = 'center';
+      drawPill(ctx, j.short, tx, cy + fs * 1.9, side === 'left' ? 'right' : 'left', levelColor(j), fs);
     };
     drawVBar('left');
     drawVBar('right');
@@ -471,7 +481,7 @@
       const v = ride ? ride.ratio : null;
       const j = judge('ride', v, (b) => (b.ride && b.ride[c] ? b.ride[c].ratio : null));
       const [cx, cy] = pos[c];
-      ctx.fillStyle = scoreColor(j.score);
+      ctx.fillStyle = levelColor(j);
       ctx.strokeStyle = '#0b0d10';
       roundRect(ctx, cx - wheelW / 2, cy - wheelH / 2, wheelW, wheelH, 6);
       ctx.fill(); ctx.stroke();
@@ -484,10 +494,7 @@
       ctx.fillStyle = '#e8ecf1';
       ctx.font = `700 ${fs * 1.15}px system-ui, sans-serif`;
       ctx.fillText(fmt(v, 2), tx, cy + fs * 0.1);
-      ctx.fillStyle = scoreColor(j.score);
-      ctx.font = `600 ${fs}px system-ui, sans-serif`;
-      ctx.fillText(j.short, tx, cy + fs * 1.3);
-      ctx.textAlign = 'center';
+      drawPill(ctx, j.short, tx, cy + fs * 1.5, left ? 'right' : 'left', levelColor(j), fs);
     }
   }
 
@@ -563,7 +570,7 @@
   }
   function row(name, val, j, sec) {
     return `<tr><td>${name}</td><td class="num">${val}</td>` +
-      `<td><span class="tag" style="background:${scoreColor(j.score)}">${j.text}</span></td>` +
+      `<td><span class="tag" style="background:${levelColor(j)}">${j.text}</span></td>` +
       `<td class="num">${(sec || 0).toFixed(0)}s</td></tr>`;
   }
 
