@@ -137,7 +137,18 @@ table.metrics { width: 100%; border-collapse: collapse; font-size: 16px; }
 
 .settings label { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; }
 .settings label.check { flex-direction: row; align-items: center; gap: 10px; }
-.settings input[type=number], .settings select {
+.settings .note {
+  margin: -2px 0 12px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: #16202c;
+  border: 1px solid #2b3c52;
+  color: var(--text);
+}
+.settings .note:empty { display: none; }
+.settings .note ul { margin: 6px 0 0; padding-left: 20px; }
+.settings .note .warn { color: #ffd166; }
+.settings input[type=number], .settings input[type=text], .settings select {
   font: inherit;
   padding: 10px;
   border-radius: 8px;

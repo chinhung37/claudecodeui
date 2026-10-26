@@ -341,6 +341,7 @@
       duration: samples[(n - 1) * STRIDE] / 1000,
       fs,
       n,
+      vehicle: activeVehicleName(),
       metrics,
       gyroCheck: cal.hasGyro ? A.gyroCheck(samples, cal, fs) : null,
     };
@@ -780,7 +781,7 @@
       return `<div class="card rec-item" data-id="${m.id}">
         <div class="head"><span>${esc(m.name)}</span>${isBase ? '<span class="badge">基準</span>' : ''}</div>
         <div class="sum">
-          ${fmtTime(m.duration)}・${Math.round(m.fs)} Hz<br>
+          ${fmtTime(m.duration)}・${Math.round(m.fs)} Hz${m.vehicle ? '・' + esc(m.vehicle) : ''}<br>
           點頭 ${fmt(x.dive, 2)}・蹲尾 ${fmt(x.squat, 2)}・左彎側傾 ${fmt(x.rollL, 2)}・右彎側傾 ${fmt(x.rollR, 2)} °/g<br>
           路感比 前左 ${fmt(x.ride && x.ride.FL.ratio, 2)}・前右 ${fmt(x.ride && x.ride.FR.ratio, 2)}・後左 ${fmt(x.ride && x.ride.RL.ratio, 2)}・後右 ${fmt(x.ride && x.ride.RR.ratio, 2)}
           ${gcText ? '<br>' + gcText : ''}
@@ -964,12 +965,127 @@
     }
   }
 
+  // ---------- 車輛與記錄的設定 ----------
+  // 內建車輛只放查得到來源的數值；查不到的欄位不填，保留使用者目前的值
+  const VEHICLES = [
+    {
+      id: 'cmc-jspace',
+      name: '中華 J SPACE（廂型車／貨車）',
+      values: { wheelbase: 2610 },
+      info: [
+        '軸距 2,610 mm（廂型車與貨車相同，多個規格來源一致）',
+        '車身 長 4,165 × 寬 1,685 × 高 1,955 mm（廂型車）',
+        '後輪驅動；前懸吊麥花臣、後懸吊葉片彈簧（單一來源，未驗證）',
+        '原廠胎 165R14C（部分車型為 15 吋）',
+      ],
+      missing: '前後輪距：查不到原廠數值（未驗證），請自己量左右輪胎中心的距離後填入下方欄位，再按「記錄目前設定」。',
+    },
+  ];
+
+  let profiles = loadJSON('sgm.profiles', []);
+  let activeVehicle = String(loadJSON('sgm.activeVehicle', '') || '');
+
+  function activeVehicleName() {
+    if (activeVehicle.startsWith('preset:')) {
+      const v = VEHICLES.find((x) => 'preset:' + x.id === activeVehicle);
+      return v ? v.name : '';
+    }
+    if (activeVehicle.startsWith('profile:')) return activeVehicle.slice(8);
+    return '';
+  }
+
+  function renderVehicles() {
+    const sel = $('#vehicleSelect');
+    const opt = (value, text) => `<option value="${esc(value)}">${esc(text)}</option>`;
+    sel.innerHTML = opt('', '— 自訂（使用下方目前數值）—') +
+      `<optgroup label="內建車輛">${VEHICLES.map((v) => opt('preset:' + v.id, v.name)).join('')}</optgroup>` +
+      (profiles.length
+        ? `<optgroup label="已記錄的設定">${profiles.map((p) => opt('profile:' + p.name, p.name)).join('')}</optgroup>`
+        : '');
+    if (![...sel.options].some((o) => o.value === activeVehicle)) activeVehicle = '';
+    sel.value = activeVehicle;
+    $('#btnDeleteProfile').disabled = !activeVehicle.startsWith('profile:');
+    if (activeVehicle.startsWith('profile:') && !$('#profileName').value) $('#profileName').value = activeVehicle.slice(8);
+    const note = $('#vehicleNote');
+    const v = VEHICLES.find((x) => 'preset:' + x.id === activeVehicle);
+    if (v) {
+      note.innerHTML = `<b>${esc(v.name)}</b><ul>${v.info.map((t) => `<li>${esc(t)}</li>`).join('')}</ul>` +
+        `<div class="warn">${esc(v.missing)}</div>`;
+    } else if (activeVehicle.startsWith('profile:')) {
+      note.innerHTML = `使用中：<b>${esc(activeVehicle.slice(8))}</b>`;
+    } else {
+      note.innerHTML = '';
+    }
+  }
+
+  function selectVehicle(value) {
+    activeVehicle = value;
+    saveJSON('sgm.activeVehicle', activeVehicle);
+    if (value.startsWith('preset:')) {
+      const v = VEHICLES.find((x) => 'preset:' + x.id === value);
+      applySettings({ ...settings, ...v.values });
+      toast(`已套用 ${v.name}`);
+    } else if (value.startsWith('profile:')) {
+      const p = profiles.find((x) => x.name === value.slice(8));
+      applySettings({ ...DEFAULT_SETTINGS, ...p.settings });
+      $('#profileName').value = p.name;
+      toast(`已套用「${p.name}」`);
+    }
+    fillSettings();
+    renderVehicles();
+  }
+
+  function saveProfile() {
+    const name = $('#profileName').value.trim();
+    if (!name) {
+      toast('請先輸入這筆設定的名稱');
+      $('#profileName').focus();
+      return;
+    }
+    const s = readSettings();
+    applySettings(s);
+    const rest = profiles.filter((p) => p.name !== name);
+    const replaced = rest.length !== profiles.length;
+    profiles = [...rest, { name, settings: s, saved: Date.now() }].sort((a, b) => a.name.localeCompare(b.name, 'zh-Hant'));
+    saveJSON('sgm.profiles', profiles);
+    activeVehicle = 'profile:' + name;
+    saveJSON('sgm.activeVehicle', activeVehicle);
+    renderVehicles();
+    toast(replaced ? `已更新「${name}」` : `已記錄「${name}」`);
+  }
+
+  function deleteProfile(btn) {
+    if (!activeVehicle.startsWith('profile:')) return;
+    if (btn.dataset.armed !== '1') {
+      btn.dataset.armed = '1';
+      btn.textContent = '再按一次刪除';
+      btn.classList.add('danger');
+      setTimeout(() => {
+        btn.dataset.armed = '';
+        btn.textContent = '刪除這筆記錄';
+        btn.classList.remove('danger');
+      }, 3000);
+      return;
+    }
+    const name = activeVehicle.slice(8);
+    profiles = profiles.filter((p) => p.name !== name);
+    saveJSON('sgm.profiles', profiles);
+    activeVehicle = '';
+    saveJSON('sgm.activeVehicle', activeVehicle);
+    $('#profileName').value = '';
+    btn.dataset.armed = '';
+    btn.textContent = '刪除這筆記錄';
+    btn.classList.remove('danger');
+    renderVehicles();
+    toast(`已刪除「${name}」`);
+  }
+
   // ---------- 分頁 ----------
   function showTab(name) {
     document.querySelectorAll('.tabs button').forEach((b) => b.classList.toggle('on', b.dataset.tab === name));
     document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('on', t.id === 'tab-' + name));
     if (name === 'records') renderRecords();
-    if (name === 'settings') fillSettings();
+    if (name === 'settings') { fillSettings(); renderVehicles(); }
     if (name === 'live' && pb) seek(pb.t);
   }
 
@@ -1009,6 +1125,10 @@
     toast('設定已儲存');
   });
   $('#btnDemo').addEventListener('click', openDemo);
+  $('#vehicleSelect').addEventListener('change', (e) => selectVehicle(e.target.value));
+  $('#btnSaveProfile').addEventListener('click', saveProfile);
+  $('#btnDeleteProfile').addEventListener('click', (e) => deleteProfile(e.currentTarget));
+  $('#profileName').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); saveProfile(); } });
   $('#btnDefaults').addEventListener('click', () => {
     settings = { ...DEFAULT_SETTINGS };
     fillSettings();

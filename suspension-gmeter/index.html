@@ -94,6 +94,22 @@
     </section>
 
     <section id="tab-settings" class="tab">
+      <div class="card settings">
+        <h3>車輛</h3>
+        <label>點選車輛或已記錄的設定（選了立即套用）
+          <select id="vehicleSelect"></select>
+        </label>
+        <div id="vehicleNote" class="note small"></div>
+        <label>把目前的設定記錄成
+          <input id="profileName" type="text" maxlength="40" placeholder="名稱，例如：我的 J SPACE 原廠避震" autocomplete="off">
+        </label>
+        <div class="controls">
+          <button type="button" id="btnSaveProfile" class="primary">記錄目前設定</button>
+          <button type="button" id="btnDeleteProfile" disabled>刪除這筆記錄</button>
+        </div>
+        <p class="muted small">記錄的內容是下面全部的設定：車輛尺寸、手機位置、判讀門檻、方向修正。之後的紀錄會標上使用中的車輛名稱。</p>
+      </div>
+
       <form id="settingsForm" class="card settings">
         <h3>車輛幾何（mm）</h3>
         <label>軸距<input name="wheelbase" type="number" inputmode="numeric"></label>
