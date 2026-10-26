@@ -51,5 +51,12 @@ Android（Chrome）與 iPhone（Safari）都可用，「加入主畫面」後就
 ## 檔案
 
 - `analysis.js`：分析核心（座標轉換、濾波、deg/g 回歸、四輪投影），瀏覽器與 Node 共用，測試在 `test/suspension-analysis.test.js`。
+- `demo.js`：模擬行車示範資料（第一次打開、或按「看示範」時使用；數值是虛構的）。
 - `app.js`：介面、感測器、校正、記錄（IndexedDB）、回放、匯出。
 - `sw.js`、`manifest.webmanifest`：PWA 離線與安裝。
+- `build-single.js`：合成單一 HTML 檔：`node suspension-gmeter/build-single.js 輸出.html`。
+
+## 單檔版（Claude Artifact）的限制
+
+嵌在 Claude 檢視器裡時，動作感測器會被封鎖，所以單檔版只能：看模擬示範、匯入 PWA 版的備份檔（.json）回放分析、匯出 CSV。
+實際上車量測請用 HTTPS 網址直接開啟的 PWA 版。

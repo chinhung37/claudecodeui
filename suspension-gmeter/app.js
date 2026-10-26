@@ -150,7 +150,11 @@
     $('#btnRec').disabled = !proc;
     requestWakeLock();
     setTimeout(() => {
-      if (!lastEventT) setStatus('收不到感測資料（瀏覽器可能封鎖）', 'err');
+      if (lastEventT) return;
+      setStatus('收不到感測資料', 'err');
+      toast(window.parent !== window
+        ? '這個頁面被嵌在其他畫面裡（例如 Claude 的檢視器），動作感測器被封鎖。請改用 HTTPS 網址直接開啟的版本。'
+        : '收不到感測資料：瀏覽器可能封鎖了動作感測器，請檢查網站權限。', 8000);
     }, 2500);
   }
 
@@ -304,17 +308,27 @@
     btn.textContent = '● 開始記錄';
     btn.classList.remove('on');
     const total = r.chunks.reduce((s, c) => s + c.length, 0) + r.n;
-    if (total < STRIDE * 50) { alert('記錄太短，沒有儲存'); return; }
+    if (total < STRIDE * 50) { toast('記錄太短，沒有儲存'); return; }
     const samples = new Float32Array(total);
     let o = 0;
     for (const c of r.chunks) { samples.set(c, o); o += c.length; }
     samples.set(r.cur.subarray(0, r.n), o);
     try {
       await storeRecording(samples, calib, defaultName(new Date()));
-      alert('已儲存，可到「紀錄」頁回放');
+      toast('已儲存，可到「紀錄」頁回放');
     } catch (e) {
-      alert('儲存失敗：' + e.message);
+      toast('儲存失敗：' + e.message);
     }
+  }
+
+  // 頁內提示（嵌入式檢視器不顯示 alert）
+  let toastTimer = 0;
+  function toast(msg, ms = 3500) {
+    const el = $('#toast');
+    el.textContent = msg;
+    el.classList.remove('hidden');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => el.classList.add('hidden'), ms);
   }
 
   async function storeRecording(samples, cal, name, created) {
@@ -602,7 +616,18 @@
   // ---------- 回放 ----------
   async function openPlayback(id) {
     const { meta, data } = await getRecording(id);
-    if (!meta || !data) { alert('讀取失敗'); return; }
+    if (!meta || !data) { toast('讀取失敗'); return; }
+    playData(meta, data);
+  }
+
+  // 示範：模擬一段行車（不需要感測器），直接回放
+  function openDemo() {
+    const d = window.SuspDemo.simulateDrive();
+    const meta = { name: '示範（模擬資料，非實車）', fs: d.fs, demo: true };
+    playData(meta, { samples: d.samples.buffer, calib: d.calib });
+  }
+
+  function playData(meta, data) {
     const samples = new Float32Array(data.samples);
     const res = A.analyzeRecording(samples, data.calib, settings, meta.fs);
     pb = {
@@ -615,11 +640,14 @@
     resetPbProc();
     trail.length = 0;
     showTab('live');
-    $('#modeBanner').textContent = `回放中：${meta.name}`;
+    $('#modeBanner').textContent = meta.demo
+      ? '示範：模擬一段 60 秒的行車（不是實車資料）。按「播放」看過程，按「離開回放」改用手機感測器。'
+      : `回放中：${meta.name}`;
     $('#modeBanner').classList.remove('hidden');
     $('#liveControls').classList.add('hidden');
     $('#playControls').classList.remove('hidden');
-    seek(0, true);
+    // 示範一打開就停在結尾，整段統計都看得到
+    seek(meta.demo ? pb.duration : 0, true);
   }
   function resetPbProc() {
     pb.proc = new A.Processor(pb.calib, settings, pb.meta.fs);
@@ -664,9 +692,15 @@
   function exitPlayback() {
     pb = null;
     trail.length = 0;
-    $('#modeBanner').classList.add('hidden');
     $('#liveControls').classList.remove('hidden');
     $('#playControls').classList.add('hidden');
+    if (calib) {
+      $('#modeBanner').classList.add('hidden');
+    } else {
+      $('#modeBanner').textContent = '第一次使用：先到「設定」填車輛尺寸，再按「啟動感測器」→「校正」。';
+    }
+    drawCar(proc ? proc.metrics() : null);
+    drawMetrics(proc ? proc.metrics() : null);
   }
 
   function drawChart() {
@@ -773,8 +807,20 @@
     return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   }
 
-  async function onRecordAction(id, act) {
+  async function onRecordAction(id, act, btn) {
     if (act === 'play') return openPlayback(id);
+    if (act === 'del' && btn.dataset.armed !== '1') {
+      // 刪除要按兩次（嵌入式檢視器不顯示 confirm）
+      btn.dataset.armed = '1';
+      btn.textContent = '再按一次刪除';
+      btn.classList.add('danger');
+      setTimeout(() => {
+        btn.dataset.armed = '';
+        btn.textContent = '刪除';
+        btn.classList.remove('danger');
+      }, 3000);
+      return;
+    }
     const { meta, data } = await getRecording(id);
     if (act === 'base') {
       // 依目前設定重算，確保與現在的判讀一致
@@ -782,15 +828,14 @@
       baseline = { id, name: meta.name, metrics: res.metrics };
       saveJSON('sgm.baseline', baseline);
       renderRecords();
+      toast(`已將「${meta.name}」設為基準`);
     } else if (act === 'rename') {
-      const name = prompt('新名稱', meta.name);
-      if (name) { meta.name = name; await putMeta(meta); renderRecords(); }
+      startRename(id, meta);
     } else if (act === 'del') {
-      if (confirm(`刪除「${meta.name}」？`)) {
-        await deleteRecording(id);
-        if (baseline && baseline.id === id) { baseline = null; saveJSON('sgm.baseline', null); }
-        renderRecords();
-      }
+      await deleteRecording(id);
+      if (baseline && baseline.id === id) { baseline = null; saveJSON('sgm.baseline', null); }
+      renderRecords();
+      toast(`已刪除「${meta.name}」`);
     } else if (act === 'csv') {
       exportCSV(meta, data);
     } else if (act === 'json') {
@@ -816,10 +861,49 @@
     download(`${fileSafe(meta.name)}.csv`, lines.join('\n'), 'text/csv');
   }
 
+  function startRename(id, meta) {
+    const head = document.querySelector(`[data-id="${id}"] .head span`);
+    if (!head) return;
+    const input = document.createElement('input');
+    input.className = 'rename';
+    input.value = meta.name;
+    head.replaceWith(input);
+    input.focus();
+    input.select();
+    let done = false;
+    const finish = async (save) => {
+      if (done) return;
+      done = true;
+      const name = input.value.trim();
+      if (save && name && name !== meta.name) {
+        meta.name = name;
+        await putMeta(meta);
+      }
+      renderRecords();
+    };
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') finish(true);
+      if (e.key === 'Escape') finish(false);
+    });
+    input.addEventListener('blur', () => finish(true));
+  }
+
   function fileSafe(s) { return String(s).replace(/[\\/:*?"<>|\s]+/g, '_'); }
 
-  function download(name, text, type) {
+  // 在 Claude 檢視器裡用平台的下載功能；一般瀏覽器用下載連結
+  async function download(name, text, type) {
     const blob = new Blob([text], { type });
+    let saver = null;
+    try { saver = window.claude && window.claude.use ? await window.claude.use('downloads') : null; } catch (_) { saver = null; }
+    if (saver) {
+      try {
+        await saver.save({ filename: name, data: blob });
+        toast('已下載 ' + name);
+      } catch (e) {
+        if (e && e.code !== 'declined') toast('下載失敗：' + (e.message || e.code));
+      }
+      return;
+    }
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -831,14 +915,23 @@
   }
 
   async function importFile(file) {
+    let obj;
     try {
-      const obj = JSON.parse(await file.text());
-      if (obj.format !== 'susp-gmeter' || !Array.isArray(obj.samples) || !obj.calib) throw new Error('格式不符');
-      const samples = Float32Array.from(obj.samples);
-      await storeRecording(samples, obj.calib, obj.name || file.name, obj.created);
-      alert('匯入完成');
+      obj = JSON.parse(await file.text());
+      if (obj.format !== 'susp-gmeter' || !Array.isArray(obj.samples) || !obj.calib) throw new Error('不是這個 App 的備份檔');
     } catch (e) {
-      alert('匯入失敗：' + e.message);
+      toast('匯入失敗：' + e.message);
+      return;
+    }
+    const samples = Float32Array.from(obj.samples);
+    const name = obj.name || file.name;
+    try {
+      await storeRecording(samples, obj.calib, name, obj.created);
+      toast('匯入完成');
+    } catch (_) {
+      // 這個瀏覽器不能存（例如私密模式）：不存，直接回放
+      toast('這個瀏覽器無法儲存紀錄，改為直接回放（重新整理後會消失）', 6000);
+      playData({ name, fs: obj.fs || obj.calib.fs, created: obj.created }, { samples: samples.buffer, calib: obj.calib });
     }
   }
 
@@ -903,7 +996,7 @@
     const btn = e.target.closest('button[data-act]');
     if (!btn) return;
     const id = Number(btn.closest('[data-id]').dataset.id);
-    onRecordAction(id, btn.dataset.act).catch((err) => alert(err.message));
+    onRecordAction(id, btn.dataset.act, btn).catch((err) => toast(err.message));
   });
   $('#importFile').addEventListener('change', (e) => {
     const f = e.target.files[0];
@@ -913,17 +1006,14 @@
   $('#settingsForm').addEventListener('submit', (e) => {
     e.preventDefault();
     applySettings(readSettings());
-    alert('已儲存');
+    toast('設定已儲存');
   });
+  $('#btnDemo').addEventListener('click', openDemo);
   $('#btnDefaults').addEventListener('click', () => {
     settings = { ...DEFAULT_SETTINGS };
     fillSettings();
   });
 
-  if (!calib) {
-    $('#modeBanner').textContent = '第一次使用：先到「設定」填車輛尺寸，再按「啟動感測器」→「校正」。';
-    $('#modeBanner').classList.remove('hidden');
-  }
   window.addEventListener('beforeunload', (e) => {
     if (recording) { e.preventDefault(); e.returnValue = ''; }
   });
@@ -934,5 +1024,7 @@
 
   drawCar(null);
   drawMetrics(null);
+  // 還沒校正過：先開示範，讓第一眼就看得到 App 在做什麼
+  if (!calib) openDemo();
   requestAnimationFrame(frame);
 })();

@@ -139,8 +139,10 @@
       };
       this.lpAx = new Biquad('lp', 2, fs);
       this.lpAy = new Biquad('lp', 2, fs);
-      this.lpP = new Biquad('lp', 8, fs);
-      this.lpQ = new Biquad('lp', 8, fs);
+      // 垂直加速度與角速度走同一個低通，四輪投影時相位才對得上
+      this.lpP = new Biquad('lp', 20, fs);
+      this.lpQ = new Biquad('lp', 20, fs);
+      this.lpZ = new Biquad('lp', 20, fs);
       this.bands = {};
       for (const c of CORNERS) {
         this.bands[c] = { lo: new Band(RIDE_LO[0], RIDE_LO[1], fs), hi: new Band(RIDE_HI[0], RIDE_HI[1], fs) };
@@ -154,7 +156,7 @@
       this.refRoll = 0; this.refPitch = 0;
       this.roll = 0; this.pitch = 0;
       this.axF = 0; this.ayF = 0;
-      this.pPrev = 0; this.qPrev = 0;
+      this.pPrev = 0; this.qPrev = 0; this.zPrev = 0;
       this.gateMs = 0;
       this.grad = { dive: new Gradient(), squat: new Gradient(), rollL: new Gradient(), rollR: new Gradient() };
       this.ride = {};
@@ -221,15 +223,17 @@
       }
 
       // 四輪垂直加速度：剛體投影 a_z + ṗ·dy − q̇·dx
-      const pF = this.lpP.step(p), qF = this.lpQ.step(q);
+      // 後向差分落在兩個取樣中間，垂直加速度也取前後平均對齊這半個取樣
+      const pF = this.lpP.step(p), qF = this.lpQ.step(q), zF = this.lpZ.step(fz);
       const dp = (pF - this.pPrev) / dt, dq = (qF - this.qPrev) / dt;
-      this.pPrev = pF; this.qPrev = qF;
+      const zMid = (zF + this.zPrev) / 2;
+      this.pPrev = pF; this.qPrev = qF; this.zPrev = zF;
       const warm = this.count > this.fs * 2;
       let gateSum = 0;
       const vals = {};
       for (const c of CORNERS) {
         const [dx, dy] = this.offsets[c];
-        const z = fz + dp * dy - dq * dx;
+        const z = zMid + dp * dy - dq * dx;
         const lo = this.bands[c].lo.step(z);
         const hi = this.bands[c].hi.step(z);
         vals[c] = [lo, hi];

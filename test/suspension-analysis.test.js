@@ -92,6 +92,40 @@ test('手機在前軸上方時，純俯仰振動只出現在後輪', () => {
   assert.ok(Math.abs(r.FL.ratio - r.FR.ratio) < 0.05 * r.RL.ratio);
 });
 
+test('9 Hz 俯仰振動投影到前後輪的振幅比例正確（相位對齊）', () => {
+  // 手機距前軸 1.1 m、後軸 1.6 m；前輪 = 0.69 + α·1.1，後輪 = 0.69 − α·1.6
+  const w = 2 * Math.PI * 9, amp = 4e-5;
+  const alpha = amp * w * w;
+  const want = (0.69 + alpha * 1.1) / (0.69 - alpha * 1.6);
+  for (const fs of [60, 100, 200]) {
+    const out = [];
+    let prev = 0;
+    for (let i = 0; i < 30 * fs; i++) {
+      const t = i / fs;
+      const ang = amp * Math.sin(w * t);
+      const q = i ? (ang - prev) * fs : 0;
+      prev = ang;
+      const f = toDevice(R_TRUE, [0, 0, G + 0.5 * Math.sin(2 * Math.PI * 1.2 * t) + 0.69 * Math.sin(w * t)]);
+      const gy = toDevice(R_TRUE, [0, q, 0]).map((x) => x * DEG);
+      out.push(t * 1000, f[0], f[1], f[2], gy[2], gy[0], gy[1]);
+    }
+    const settings = { ...SETTINGS, phoneX: 1100, rideGate: 0.1 };
+    const { metrics } = A.analyzeRecording(Float64Array.from(out), calibFor(R_TRUE), settings, fs);
+    const got = metrics.ride.FL.hi / metrics.ride.RL.hi;
+    assert.ok(Math.abs(got - want) / want < 0.08, `fs=${fs}: ${got} ≈ ${want}`);
+  }
+});
+
+test('示範資料：各項指標都有值，陀螺儀軸檢查判定標準對應', () => {
+  const D = require('../suspension-gmeter/demo');
+  const d = D.simulateDrive();
+  const { metrics } = A.analyzeRecording(d.samples, d.calib, { ...SETTINGS, phoneX: 1100, rideGate: 0.2 }, d.fs);
+  for (const k of ['dive', 'squat', 'rollL', 'rollR']) assert.ok(metrics[k] > 0, k);
+  for (const c of A.CORNERS) assert.ok(metrics.ride[c].ratio > 0, c);
+  assert.ok(metrics.ride.FL.ratio > metrics.ride.RL.ratio, '示範車設定為前硬後軟');
+  assert.ok(A.gyroCheck(d.samples, d.calib, d.fs).spec > 0.9);
+});
+
 test('沒有在動（低於門檻）時不累積路感統計', () => {
   const samples = simulate(10, () => ({ ax: 0, ay: 0 }), { dive: 0, squat: 0, rollL: 0, rollR: 0 });
   const { metrics } = A.analyzeRecording(samples, calibFor(R_TRUE), SETTINGS, FS);
