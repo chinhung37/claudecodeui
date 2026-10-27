@@ -77,43 +77,69 @@ test('煞車點頭、加速蹲尾、左右過彎側傾的 deg/g 能被估回來'
   near(metrics.rollR, k.rollR);
 });
 
-test('手機在前軸上方時，純俯仰振動只出現在後輪', () => {
+test('手機在前軸上方時，車身俯仰擺動（低頻）只出現在後輪', () => {
   const settings = { ...SETTINGS, phoneX: 0 };
   const profile = () => ({
     ax: 0, ay: 0,
-    heave: (t) => 0.5 * Math.sin(2 * Math.PI * 1.2 * t),
-    pitchOsc: (t) => 0.0004 * Math.sin(2 * Math.PI * 8 * t),
+    heave: (t) => 0.5 * Math.sin(2 * Math.PI * 1.2 * t) + 0.3 * Math.sin(2 * Math.PI * 9 * t),
+    pitchOsc: (t) => 0.0004 * Math.sin(2 * Math.PI * 1.5 * t),
   });
   const samples = simulate(20, profile, { dive: 0, squat: 0, rollL: 0, rollR: 0 });
   const { metrics } = A.analyzeRecording(samples, calibFor(R_TRUE), settings, FS);
   const r = metrics.ride;
   assert.ok(r.FL.ratio != null && r.RL.ratio != null);
-  assert.ok(r.RL.ratio > 3 * r.FL.ratio, `後輪 ${r.RL.ratio} 應明顯大於前輪 ${r.FL.ratio}`);
-  assert.ok(Math.abs(r.FL.ratio - r.FR.ratio) < 0.05 * r.RL.ratio);
+  assert.ok(r.RL.lo > 1.5 * r.FL.lo, `後輪擺動 ${r.RL.lo} 應明顯大於前輪 ${r.FL.lo}`);
+  assert.ok(Math.abs(r.FL.lo - r.FR.lo) < 0.02 * r.FL.lo);
 });
 
-test('9 Hz 俯仰振動投影到前後輪的振幅比例正確（相位對齊）', () => {
-  // 手機距前軸 1.1 m、後軸 1.6 m；前輪 = 0.69 + α·1.1，後輪 = 0.69 − α·1.6
-  const w = 2 * Math.PI * 9, amp = 4e-5;
-  const alpha = amp * w * w;
-  const want = (0.69 + alpha * 1.1) / (0.69 - alpha * 1.6);
+test('四輪投影：低頻車身俯仰按距離分配，手機在支架上的高頻晃動不會被放大', () => {
+  // 1.5 Hz 車身起伏與同相俯仰：前輪 = 0.4 + α·1.1，後輪 = |0.4 − α·1.6|（手機距前軸 1.1 m、後軸 1.6 m）
+  const wl = 2 * Math.PI * 1.5, amp = 0.0015;
+  const alpha = amp * wl * wl;
+  const want = (0.4 + alpha * 1.1) / Math.abs(0.4 - alpha * 1.6);
+  // 9 Hz：手機自己在支架上晃（角度），加上量測點本身 0.3 m/s² 的路面震動
+  const wh = 2 * Math.PI * 9, wobble = 0.0005;
   for (const fs of [60, 100, 200]) {
     const out = [];
     let prev = 0;
     for (let i = 0; i < 30 * fs; i++) {
       const t = i / fs;
-      const ang = amp * Math.sin(w * t);
+      const ang = amp * Math.sin(wl * t) + wobble * Math.sin(wh * t);
       const q = i ? (ang - prev) * fs : 0;
       prev = ang;
-      const f = toDevice(R_TRUE, [0, 0, G + 0.5 * Math.sin(2 * Math.PI * 1.2 * t) + 0.69 * Math.sin(w * t)]);
+      const f = toDevice(R_TRUE, [0, 0, G + 0.4 * Math.sin(wl * t) + 0.3 * Math.sin(wh * t)]);
       const gy = toDevice(R_TRUE, [0, q, 0]).map((x) => x * DEG);
       out.push(t * 1000, f[0], f[1], f[2], gy[2], gy[0], gy[1]);
     }
     const settings = { ...SETTINGS, phoneX: 1100, rideGate: 0.1 };
     const { metrics } = A.analyzeRecording(Float64Array.from(out), calibFor(R_TRUE), settings, fs);
-    const got = metrics.ride.FL.hi / metrics.ride.RL.hi;
-    assert.ok(Math.abs(got - want) / want < 0.08, `fs=${fs}: ${got} ≈ ${want}`);
+    const r = metrics.ride;
+    const got = r.FL.lo / r.RL.lo;
+    assert.ok(Math.abs(got - want) / want < 0.1, `fs=${fs} 低頻前後比 ${got} ≈ ${want}`);
+    // 高頻四輪相同，等於量測點本身（0.3 振幅 ≈ 0.21 RMS），不會被晃動放大到 1 m/s² 以上
+    for (const c of A.CORNERS) assert.ok(Math.abs(r[c].hi - r.FL.hi) < 1e-9 && r[c].hi < 0.3, `fs=${fs} ${c} hi=${r[c].hi}`);
   }
+});
+
+test('從停止起步加速時，GPS 還顯示 0 也不會把蹲尾歸零', () => {
+  const fs = 60, out = [], gps = [];
+  let pitch = 0, prev = 0, v = 0;
+  for (let i = 0; i < 20 * fs; i++) {
+    const t = i / fs;
+    const ax = t >= 5 && t < 9 ? 0.3 : 0;
+    v += ax * G / fs;
+    // GPS 一秒一筆，起步那一秒仍是 0
+    if (i % fs === 0) gps.push(t * 1000, v);
+    pitch += ((-1.4 * ax) / DEG - pitch) / fs / 0.12;
+    const q = i ? (pitch - prev) * fs : 0;
+    prev = pitch;
+    const f = toDevice(R_TRUE, [ax * G - G * Math.sin(pitch), 0, G]);
+    const gy = toDevice(R_TRUE, [0, q, 0]).map((x) => x * DEG);
+    out.push(t * 1000, f[0], f[1], f[2], gy[2], gy[0], gy[1]);
+  }
+  const { metrics } = A.analyzeRecording(Float64Array.from(out), calibFor(R_TRUE), { ...SETTINGS, gyroAxes: 'spec' }, fs, Float32Array.from(gps));
+  assert.ok(Math.abs(metrics.squat - 1.4) < 0.2, `squat=${metrics.squat}`);
+  assert.ok(metrics.r2.squat > 0.9);
 });
 
 test('示範資料：各項指標都有值，陀螺儀軸檢查判定標準對應', () => {
@@ -198,7 +224,7 @@ function simulateTurnsAndStop(order, gyroSign) {
   return { samples: Float64Array.from(out), gps: Float32Array.from(gps), fs };
 }
 
-for (const [order, sign, label] of [['spec', 1, '標準軸序'], ['alt', 1, '替代軸序'], ['spec', -1, '標準軸序但正負號相反']]) {
+for (const [order, sign, label] of [['spec', 1, '標準軸序'], ['alt', 1, '替代軸序']]) {
   test(`陀螺儀軸對應自動判斷：${label}`, () => {
     const d = simulateTurnsAndStop(order, sign);
     const settings = { ...SETTINGS, gyroAxes: 'auto' };

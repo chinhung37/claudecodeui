@@ -8,13 +8,13 @@
   const DEFAULT_SETTINGS = {
     wheelbase: 2700, trackF: 1550, trackR: 1550, phoneX: 1100, phoneY: 0,
     rollSoft: 6, rollHard: 2, pitchSoft: 4, pitchHard: 1.5,
-    rideSoft: 0.4, rideHard: 1.2, rideGate: 0.2,
+    rideGate: 0.2,
     // 舊版存的 gyroMap 不再使用：各手機不同，改成預設自動判斷
     useBaseline: false, gyroAxes: 'auto',
     flipLong: false, flipLat: false, flipPitch: false, flipRoll: false,
   };
   const NUM_KEYS = ['wheelbase', 'trackF', 'trackR', 'phoneX', 'phoneY', 'rollSoft', 'rollHard',
-    'pitchSoft', 'pitchHard', 'rideSoft', 'rideHard', 'rideGate'];
+    'pitchSoft', 'pitchHard', 'rideGate'];
   const BOOL_KEYS = ['useBaseline', 'flipLong', 'flipLat', 'flipPitch', 'flipRoll'];
   const CORNER_NAME = { FL: '前左', FR: '前右', RL: '後左', RR: '後右' };
 
@@ -411,41 +411,46 @@
   }
 
   // ---------- 判讀 ----------
-  function judge(kind, value, baseKey) {
-    // kind: 'roll' | 'pitch' | 'ride'
+  // 點頭、蹲尾、側傾（deg/g）。kind: 'roll' | 'pitch'；r2：回歸的吻合度
+  function judge(kind, value, baseKey, r2) {
     if (value == null) return { level: null, text: '資料不足', short: '資料不足' };
-    // 煞車時車頭上揚、過彎時往內側傾，物理上不合理：多半是方向或陀螺儀軸設錯，不能當成「硬」
-    if (kind !== 'ride' && value <= 0) return { level: null, text: '數值異常', short: '異常', note: '檢查方向修正' };
-    const lowerIsHarder = kind !== 'ride';
-    if (settings.useBaseline && baseline) {
-      return judgePct(A.vsBaseline(value, baseKey(baseline.metrics), lowerIsHarder), '');
+    // 角度大多不是 G 值造成的（溫和駕駛時路面起伏比車身傾斜還大），算出來的斜率沒有意義
+    if (r2 != null && r2 < A.MIN_R2) {
+      return { level: null, text: '不可靠', short: '不可靠', note: kind === 'pitch' ? '需要明確的煞車/加速' : '需要更多彎道' };
     }
-    const [soft, hard] = kind === 'roll' ? [settings.rollSoft, settings.rollHard]
-      : kind === 'pitch' ? [settings.pitchSoft, settings.pitchHard]
-        : [settings.rideSoft, settings.rideHard];
+    // 煞車時車頭上揚、過彎時往內側傾，物理上不合理：多半是方向或陀螺儀軸設錯，不能當成「硬」
+    if (value <= 0) return { level: null, text: '數值異常', short: '異常', note: '檢查方向修正' };
+    if (settings.useBaseline && baseline) {
+      return judgePct(A.vsBaseline(value, baseKey(baseline.metrics), true), '', '基準');
+    }
+    const [soft, hard] = kind === 'roll' ? [settings.rollSoft, settings.rollHard] : [settings.pitchSoft, settings.pitchHard];
     const score = A.hardness(value, soft, hard);
     const level = score < 0.34 ? 'soft' : score > 0.66 ? 'hard' : 'mid';
     return { level, text: LEVEL_TEXT[level], short: LEVEL_TEXT[level] };
   }
 
-  // 與基準的差異（變硬 %）換成判讀；note 顯示在表格標籤下方
-  function judgePct(pct, note) {
-    if (pct == null) return { level: null, text: '基準無資料', short: '無基準' };
+  // 差異（變硬 %）換成判讀；ref 是比較對象，note 顯示在表格標籤下方
+  function judgePct(pct, note, ref) {
+    if (pct == null) return { level: null, text: `${ref}無資料`, short: `無${ref}` };
     const near = Math.abs(pct) < 5;
     const level = near ? 'mid' : pct > 0 ? 'hard' : 'soft';
     const dir = pct > 0 ? '硬' : '軟';
     const p = Math.abs(pct).toFixed(0) + '%';
-    return { level, text: near ? '與基準相近' : `比基準${dir} ${p}`, short: near ? '相近' : `${dir} ${p}`, note };
+    return { level, text: near ? `與${ref}相近` : `比${ref}${dir} ${p}`, short: near ? '相近' : `${dir} ${p}`, note };
   }
 
-  // 路感比：與基準比較時只比同一時速段（兩邊都有 GPS 才做得到）
+  // 路感比沒有可靠的絕對門檻（實車資料跟手機、支架、車速都有關），所以：
+  // 有基準 → 跟基準比（只比同一時速段）；沒有基準 → 跟這次四輪的平均比，看哪一角相對硬或軟
   function judgeRide(m, c) {
     const value = m && m.ride[c] ? m.ride[c].ratio : null;
-    if (value != null && settings.useBaseline && baseline) {
+    if (value == null) return { level: null, text: '資料不足', short: '資料不足' };
+    if (settings.useBaseline && baseline) {
       const cmp = A.compareRide(m, baseline.metrics, c);
-      return judgePct(cmp && cmp.pct, cmp && !cmp.matched ? '（未分時速）' : '（同時速段）');
+      return judgePct(cmp && cmp.pct, cmp && !cmp.matched ? '（未分時速）' : '（同時速段）', '基準');
     }
-    return judge('ride', value, null);
+    const all = A.CORNERS.map((k) => m.ride[k].ratio).filter((x) => x != null);
+    const mean = all.reduce((a, b) => a + b, 0) / all.length;
+    return judgePct(all.length > 1 ? (value / mean - 1) * 100 : null, '', '四輪平均');
   }
 
   // 三段固定高對比色：藍 = 偏軟、綠 = 適中、紅 = 偏硬
@@ -513,7 +518,9 @@
     ctx.fillText('▲ 車頭', W / 2, by0 + fs * 1.3);
 
     const edgeInfo = {};
-    for (const e of EDGES) edgeInfo[e.side] = { e, v: m ? m[e.key] : null, j: judge(e.kind, m ? m[e.key] : null, (b) => b[e.key]) };
+    for (const e of EDGES) {
+      edgeInfo[e.side] = { e, v: m ? m[e.key] : null, j: judge(e.kind, m ? m[e.key] : null, (b) => b[e.key], m && m.r2 ? m.r2[e.key] : null) };
+    }
 
     // 前後支撐條
     const barT = H * 0.05;
@@ -643,7 +650,7 @@
     const rows = [];
     for (const e of EDGES) {
       const v = m ? m[e.key] : null;
-      const j = judge(e.kind, v, (b) => b[e.key]);
+      const j = judge(e.kind, v, (b) => b[e.key], m && m.r2 ? m.r2[e.key] : null);
       rows.push(row(`${e.label}<br><span class="muted small">${e.desc}</span>`, `${fmt(v, 2)}°/g`, j, m ? m.seconds[e.key] : 0));
     }
     for (const c of A.CORNERS) {
