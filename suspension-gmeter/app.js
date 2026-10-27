@@ -107,9 +107,11 @@
   let calibStart = 0;
   let calibStatic = null;
   let fwdDetector = null;
-  let recording = null; // { chunks, cur, n, t0, startWall }
+  let recording = null; // { chunks, cur, n, t0, startWall, lastRel, gps }
   let wakeLock = null;
   let pb = null; // 回放狀態
+  // GPS：時速 m/s、收到的時間（performance.now）、精度、狀態文字
+  const gps = { watchId: null, speed: null, t: 0, acc: null, state: '' };
 
   function buildProcessor() {
     proc = calib ? new A.Processor(calib, settings, calib.fs) : null;
@@ -149,6 +151,7 @@
     $('#btnResetStats').disabled = !proc;
     $('#btnRec').disabled = !proc;
     requestWakeLock();
+    startGps();
     setTimeout(() => {
       if (lastEventT) return;
       setStatus('收不到感測資料', 'err');
@@ -156,6 +159,42 @@
         ? '這個頁面被嵌在其他畫面裡（例如 Claude 的檢視器），動作感測器被封鎖。請改用 HTTPS 網址直接開啟的版本。'
         : '收不到感測資料：瀏覽器可能封鎖了動作感測器，請檢查網站權限。', 8000);
     }, 2500);
+  }
+
+  // GPS 時速：大約一秒一筆。拿不到也不影響其他功能，只是不分時速段。
+  function startGps() {
+    if (!('geolocation' in navigator)) { gps.state = '無 GPS'; return; }
+    gps.state = 'GPS 定位中';
+    try {
+      gps.watchId = navigator.geolocation.watchPosition(onPosition, onPositionError, {
+        enableHighAccuracy: true, maximumAge: 0, timeout: 15000,
+      });
+    } catch (_) {
+      gps.state = 'GPS 無法使用';
+    }
+  }
+  function onPosition(p) {
+    const s = p.coords.speed;
+    // 沒有時速（null）或無效（負值）都當作不知道
+    gps.speed = s == null || !isFinite(s) || s < 0 ? null : s;
+    gps.t = performance.now();
+    gps.acc = p.coords.accuracy;
+    gps.state = gps.speed == null ? 'GPS 無時速' : 'GPS';
+    const r = recording;
+    if (r && r.t0 != null && gps.speed != null) r.gps.push(r.lastRel, gps.speed);
+  }
+  function onPositionError(e) {
+    // 1 = 權限被拒、2 = 位置無法取得、3 = 逾時（會繼續等）
+    if (e.code === 1) {
+      gps.state = 'GPS 權限被拒';
+      toast('沒有位置權限，時速不會記錄；其他功能照常。要開啟請到瀏覽器的網站設定允許「位置」。', 7000);
+    } else {
+      gps.state = 'GPS 訊號不足';
+    }
+  }
+  // 目前時速 m/s；超過 3 秒沒新資料就當不知道
+  function speedNow() {
+    return gps.speed != null && performance.now() - gps.t <= A.GPS_STALE_MS ? gps.speed : null;
   }
 
   async function requestWakeLock() {
@@ -194,16 +233,22 @@
       return;
     }
     if (!proc) return;
-    liveState = proc.step(t, g.x, g.y, g.z, ra, rb, rg);
+    liveState = proc.step(t, g.x, g.y, g.z, ra, rb, rg, speedNow());
     if (recording) {
       const r = recording;
-      if (r.t0 == null) r.t0 = t;
+      if (r.t0 == null) {
+        r.t0 = t;
+        // 開始記錄當下已經有時速，先記一筆
+        const v = speedNow();
+        if (v != null) r.gps.push(0, v);
+      }
       if (r.n + STRIDE > r.cur.length) {
         r.chunks.push(r.cur);
         r.cur = new Float32Array(STRIDE * 4096);
         r.n = 0;
       }
-      r.cur.set([t - r.t0, g.x, g.y, g.z, ra, rb, rg], r.n);
+      r.lastRel = t - r.t0;
+      r.cur.set([r.lastRel, g.x, g.y, g.z, ra, rb, rg], r.n);
       r.n += STRIDE;
     }
   }
@@ -219,6 +264,7 @@
     const parts = [Math.round(rateEst) + ' Hz'];
     if (!gyroSeen) parts.push('無陀螺儀');
     parts.push(calib ? '已校正' : '未校正');
+    if (gps.state) parts.push(gps.state);
     if (recording) parts.push('● ' + fmtTime((performance.now() - recording.startWall) / 1000));
     setStatus(parts.join('・'), calib ? 'ok' : '');
   }
@@ -298,7 +344,10 @@
     if (!recording) {
       if (!proc) return;
       proc.resetStats();
-      recording = { chunks: [], cur: new Float32Array(STRIDE * 4096), n: 0, t0: null, startWall: performance.now() };
+      recording = {
+        chunks: [], cur: new Float32Array(STRIDE * 4096), n: 0, t0: null,
+        startWall: performance.now(), lastRel: 0, gps: [],
+      };
       btn.textContent = '■ 停止記錄';
       btn.classList.add('on');
       return;
@@ -314,8 +363,8 @@
     for (const c of r.chunks) { samples.set(c, o); o += c.length; }
     samples.set(r.cur.subarray(0, r.n), o);
     try {
-      await storeRecording(samples, calib, defaultName(new Date()));
-      toast('已儲存，可到「紀錄」頁回放');
+      await storeRecording(samples, calib, defaultName(new Date()), null, Float32Array.from(r.gps), activeVehicleName());
+      toast(r.gps.length ? '已儲存，可到「紀錄」頁回放' : '已儲存（這段沒有收到 GPS 時速），可到「紀錄」頁回放', 5000);
     } catch (e) {
       toast('儲存失敗：' + e.message);
     }
@@ -331,9 +380,11 @@
     toastTimer = setTimeout(() => el.classList.add('hidden'), ms);
   }
 
-  async function storeRecording(samples, cal, name, created) {
+  // gpsTrack：時速軌跡 Float32Array（時間 ms、m/s 交錯），沒有就給空陣列
+  async function storeRecording(samples, cal, name, created, gpsTrack, vehicle) {
     const fs = cal.fs;
-    const { metrics } = A.analyzeRecording(samples, cal, settings, fs);
+    const track = gpsTrack && gpsTrack.length ? gpsTrack : null;
+    const { metrics } = A.analyzeRecording(samples, cal, settings, fs, track);
     const n = samples.length / STRIDE;
     const meta = {
       name,
@@ -341,11 +392,14 @@
       duration: samples[(n - 1) * STRIDE] / 1000,
       fs,
       n,
-      vehicle: activeVehicleName(),
+      vehicle: vehicle || '',
+      hasGps: !!track,
       metrics,
       gyroCheck: cal.hasGyro ? A.gyroCheck(samples, cal, fs) : null,
     };
-    const id = await saveRecording(meta, { samples: samples.buffer.slice(0), calib: cal });
+    const data = { samples: samples.buffer.slice(0), calib: cal };
+    if (track) data.gps = track.buffer.slice(0);
+    const id = await saveRecording(meta, data);
     renderRecords();
     return id;
   }
@@ -361,14 +415,7 @@
     if (value == null) return { level: null, text: '資料不足', short: '資料不足' };
     const lowerIsHarder = kind !== 'ride';
     if (settings.useBaseline && baseline) {
-      const base = baseKey(baseline.metrics);
-      const pct = A.vsBaseline(value, base, lowerIsHarder);
-      if (pct == null) return { level: null, text: '基準無資料', short: '無基準' };
-      const near = Math.abs(pct) < 5;
-      const level = near ? 'mid' : pct > 0 ? 'hard' : 'soft';
-      const dir = pct > 0 ? '硬' : '軟';
-      const p = Math.abs(pct).toFixed(0) + '%';
-      return { level, text: near ? '與基準相近' : `比基準${dir} ${p}`, short: near ? '相近' : `${dir} ${p}` };
+      return judgePct(A.vsBaseline(value, baseKey(baseline.metrics), lowerIsHarder), '');
     }
     const [soft, hard] = kind === 'roll' ? [settings.rollSoft, settings.rollHard]
       : kind === 'pitch' ? [settings.pitchSoft, settings.pitchHard]
@@ -376,6 +423,26 @@
     const score = A.hardness(value, soft, hard);
     const level = score < 0.34 ? 'soft' : score > 0.66 ? 'hard' : 'mid';
     return { level, text: LEVEL_TEXT[level], short: LEVEL_TEXT[level] };
+  }
+
+  // 與基準的差異（變硬 %）換成判讀；note 顯示在表格標籤下方
+  function judgePct(pct, note) {
+    if (pct == null) return { level: null, text: '基準無資料', short: '無基準' };
+    const near = Math.abs(pct) < 5;
+    const level = near ? 'mid' : pct > 0 ? 'hard' : 'soft';
+    const dir = pct > 0 ? '硬' : '軟';
+    const p = Math.abs(pct).toFixed(0) + '%';
+    return { level, text: near ? '與基準相近' : `比基準${dir} ${p}`, short: near ? '相近' : `${dir} ${p}`, note };
+  }
+
+  // 路感比：與基準比較時只比同一時速段（兩邊都有 GPS 才做得到）
+  function judgeRide(m, c) {
+    const value = m && m.ride[c] ? m.ride[c].ratio : null;
+    if (value != null && settings.useBaseline && baseline) {
+      const cmp = A.compareRide(m, baseline.metrics, c);
+      return judgePct(cmp && cmp.pct, cmp && !cmp.matched ? '（未分時速）' : '（同時速段）');
+    }
+    return judge('ride', value, null);
   }
 
   // 三段固定高對比色：藍 = 偏軟、綠 = 適中、紅 = 偏硬
@@ -494,7 +561,7 @@
     for (const c of A.CORNERS) {
       const ride = m ? m.ride[c] : null;
       const v = ride ? ride.ratio : null;
-      const j = judge('ride', v, (b) => (b.ride && b.ride[c] ? b.ride[c].ratio : null));
+      const j = judgeRide(m, c);
       const [cx, cy] = pos[c];
       ctx.fillStyle = levelColor(j);
       ctx.strokeStyle = '#0b0d10';
@@ -566,6 +633,7 @@
     $('#roLat').textContent = st ? fmt(st.ayg, 2) : '0.00';
     $('#roPitch').textContent = st ? fmt(st.pitchDeg, 1) : '0.0';
     $('#roRoll').textContent = st ? fmt(st.rollDeg, 1) : '0.0';
+    $('#roSpeed').textContent = st && st.speedKmh != null ? Math.round(st.speedKmh) : '—';
   }
 
   function drawMetrics(m) {
@@ -577,16 +645,33 @@
     }
     for (const c of A.CORNERS) {
       const r = m ? m.ride[c] : null;
-      const j = judge('ride', r && r.ratio, (b) => (b.ride && b.ride[c] ? b.ride[c].ratio : null));
+      const j = judgeRide(m, c);
       const live = r && r.live != null ? `<br><span class="muted small">即時 ${r.live.toFixed(2)}</span>` : '';
       rows.push(row(`${CORNER_NAME[c]}<br><span class="muted small">路感比</span>`, `${fmt(r && r.ratio, 2)}${live}`, j, r ? r.seconds : 0));
     }
     $('#metricsBody').innerHTML = rows.join('');
+    drawBands(m);
   }
   function row(name, val, j, sec) {
+    const note = j.note ? `<br><span class="muted small">${j.note}</span>` : '';
     return `<tr><td>${name}</td><td class="num">${val}</td>` +
-      `<td><span class="tag" style="background:${levelColor(j)}">${j.text}</span></td>` +
+      `<td><span class="tag" style="background:${levelColor(j)}">${j.text}</span>${note}</td>` +
       `<td class="num">${(sec || 0).toFixed(0)}s</td></tr>`;
+  }
+
+  // 路感比依 GPS 時速分段：每一格是比值，下方小字是秒數
+  function drawBands(m) {
+    const bands = m && m.rideBands;
+    const has = bands && bands.some((b) => A.CORNERS.some((c) => b.corners[c].seconds > 0));
+    $('#bandsCard').classList.toggle('hidden', !has);
+    if (!has) return;
+    const head = `<tr><th>路感比</th>${bands.map((b) => `<th>${b.label}<br><span class="muted small">km/h</span></th>`).join('')}</tr>`;
+    const body = A.CORNERS.map((c) => `<tr><td>${CORNER_NAME[c]}</td>${bands.map((b) => {
+      const x = b.corners[c];
+      return `<td class="num">${fmt(x.ratio, 2)}<br><span class="muted small">${x.seconds.toFixed(0)}s</span></td>`;
+    }).join('')}</tr>`).join('');
+    $('#bandsTable').innerHTML = `<thead>${head}</thead><tbody>${body}</tbody>`;
+    $('#speedMax').textContent = m.speedMax != null ? `最高時速 ${Math.round(m.speedMax)} km/h` : '';
   }
 
   // ---------- 主迴圈 ----------
@@ -625,14 +710,20 @@
   function openDemo() {
     const d = window.SuspDemo.simulateDrive();
     const meta = { name: '示範（模擬資料，非實車）', fs: d.fs, demo: true };
-    playData(meta, { samples: d.samples.buffer, calib: d.calib });
+    playData(meta, { samples: d.samples.buffer, gps: d.gps.buffer, calib: d.calib });
+  }
+
+  // 紀錄裡的 GPS 時速軌跡；舊紀錄沒有就回 null
+  function gpsOf(data) {
+    return data && data.gps ? new Float32Array(data.gps) : null;
   }
 
   function playData(meta, data) {
     const samples = new Float32Array(data.samples);
-    const res = A.analyzeRecording(samples, data.calib, settings, meta.fs);
+    const track = gpsOf(data);
+    const res = A.analyzeRecording(samples, data.calib, settings, meta.fs, track);
     pb = {
-      meta, calib: data.calib, samples, series: res.series,
+      meta, calib: data.calib, samples, track, series: res.series,
       n: samples.length / STRIDE,
       duration: samples[samples.length - STRIDE],
       t: 0, idx: 0, proc: null, state: null, playing: false, speed: Number($('#playSpeed').value),
@@ -652,6 +743,7 @@
   }
   function resetPbProc() {
     pb.proc = new A.Processor(pb.calib, settings, pb.meta.fs);
+    pb.speeds = new A.SpeedTrack(pb.track);
     pb.idx = 0;
     pb.state = null;
   }
@@ -666,7 +758,7 @@
     const s = pb.samples;
     while (pb.idx < pb.n && s[pb.idx * STRIDE] <= t) {
       const o = pb.idx * STRIDE;
-      pb.state = pb.proc.step(s[o], s[o + 1], s[o + 2], s[o + 3], s[o + 4], s[o + 5], s[o + 6]);
+      pb.state = pb.proc.step(s[o], s[o + 1], s[o + 2], s[o + 3], s[o + 4], s[o + 5], s[o + 6], pb.speeds.at(s[o]));
       pb.idx++;
     }
     drawGBall(pb.state);
@@ -705,42 +797,58 @@
   }
 
   function drawChart() {
-    const { ctx, w, h } = fitCanvas($('#chartCanvas'));
-    if (w < 80) return;
-    ctx.clearRect(0, 0, w, h);
+    const canvas = $('#chartCanvas');
     const s = pb.series;
     const n = s.t.length;
+    const hasSpeed = s.speed.some((v) => isFinite(v));
+    // 有時速時多一格，圖拉高一點
+    canvas.style.aspectRatio = hasSpeed ? '1.35 / 1' : '2 / 1';
+    const { ctx, w, h } = fitCanvas(canvas);
+    if (w < 80) return;
+    ctx.clearRect(0, 0, w, h);
     if (n < 2) return;
     const padL = 44, padR = 6, gap = 10;
-    const ph = (h - gap) / 2;
     const panels = [
-      { y0: 0, keys: [['axg', '縱向 G', '#ffd166', 1], ['ayg', '橫向 G', '#4cc9f0', 1]], unit: 'g' },
-      { y0: ph + gap, keys: [['pitch', '俯仰°', '#f72585', 1], ['roll', '側傾°', '#80ed99', 1]], unit: '°' },
+      { keys: [['axg', '縱向 G', '#ffd166', 1], ['ayg', '橫向 G', '#4cc9f0', 1]] },
+      { keys: [['pitch', '俯仰°', '#f72585', 1], ['roll', '側傾°', '#80ed99', 1]] },
     ];
+    // 時速只有正值：0 在底部
+    if (hasSpeed) panels.push({ keys: [['speed', '時速 km/h', '#c5a3ff', 1]], positive: true });
+    const ph = (h - gap * (panels.length - 1)) / panels.length;
+    panels.forEach((p, i) => { p.y0 = i * (ph + gap); });
     const tx = (t) => padL + (t / pb.duration) * (w - padL - padR);
     for (const p of panels) {
-      let lim = 0.1;
-      for (const [k, , , sign] of p.keys) for (let i = 0; i < n; i += 4) lim = Math.max(lim, Math.abs(s[k][i] * sign));
+      let lim = p.positive ? 10 : 0.1;
+      for (const [k, , , sign] of p.keys) {
+        for (let i = 0; i < n; i += 4) if (isFinite(s[k][i])) lim = Math.max(lim, Math.abs(s[k][i] * sign));
+      }
       lim *= 1.1;
-      const ty = (v) => p.y0 + ph / 2 - (v / lim) * (ph / 2 - 4);
+      const ty = p.positive
+        ? (v) => p.y0 + ph - 4 - (v / lim) * (ph - 8)
+        : (v) => p.y0 + ph / 2 - (v / lim) * (ph / 2 - 4);
       ctx.strokeStyle = '#2c333d';
       ctx.lineWidth = 1;
       ctx.strokeRect(padL, p.y0, w - padL - padR, ph);
-      ctx.beginPath(); ctx.moveTo(padL, ty(0)); ctx.lineTo(w - padR, ty(0)); ctx.stroke();
+      if (!p.positive) { ctx.beginPath(); ctx.moveTo(padL, ty(0)); ctx.lineTo(w - padR, ty(0)); ctx.stroke(); }
       ctx.fillStyle = '#98a2ae';
       ctx.font = '500 13px system-ui, sans-serif';
       ctx.textAlign = 'right';
       ctx.textBaseline = 'middle';
-      ctx.fillText(`+${lim.toFixed(lim < 2 ? 2 : 1)}`, padL - 4, p.y0 + 8);
-      ctx.fillText(`-${lim.toFixed(lim < 2 ? 2 : 1)}`, padL - 4, p.y0 + ph - 8);
+      const digits = lim < 2 ? 2 : lim < 20 ? 1 : 0;
+      ctx.fillText(`${p.positive ? '' : '+'}${lim.toFixed(digits)}`, padL - 4, p.y0 + 8);
+      ctx.fillText(p.positive ? '0' : `-${lim.toFixed(digits)}`, padL - 4, p.y0 + ph - 8);
       const step = Math.max(1, Math.floor(n / (w * 1.5)));
       p.keys.forEach(([k, label, color, sign], li) => {
         ctx.strokeStyle = color;
         ctx.lineWidth = 1.5;
         ctx.beginPath();
+        let pen = false;
         for (let i = 0; i < n; i += step) {
+          // 沒有時速的區段（GPS 斷訊）不畫線
+          if (!isFinite(s[k][i])) { pen = false; continue; }
           const x = tx(s.t[i]), y = ty(s[k][i] * sign);
-          i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+          if (pen) ctx.lineTo(x, y); else ctx.moveTo(x, y);
+          pen = true;
         }
         ctx.stroke();
         ctx.fillStyle = color;
@@ -781,7 +889,7 @@
       return `<div class="card rec-item" data-id="${m.id}">
         <div class="head"><span>${esc(m.name)}</span>${isBase ? '<span class="badge">基準</span>' : ''}</div>
         <div class="sum">
-          ${fmtTime(m.duration)}・${Math.round(m.fs)} Hz${m.vehicle ? '・' + esc(m.vehicle) : ''}<br>
+          ${fmtTime(m.duration)}・${Math.round(m.fs)} Hz${m.vehicle ? '・' + esc(m.vehicle) : ''}・${x.speedMax != null ? `最高 ${Math.round(x.speedMax)} km/h` : '無 GPS 時速'}<br>
           點頭 ${fmt(x.dive, 2)}・蹲尾 ${fmt(x.squat, 2)}・左彎側傾 ${fmt(x.rollL, 2)}・右彎側傾 ${fmt(x.rollR, 2)} °/g<br>
           路感比 前左 ${fmt(x.ride && x.ride.FL.ratio, 2)}・前右 ${fmt(x.ride && x.ride.FR.ratio, 2)}・後左 ${fmt(x.ride && x.ride.RL.ratio, 2)}・後右 ${fmt(x.ride && x.ride.RR.ratio, 2)}
           ${gcText ? '<br>' + gcText : ''}
@@ -825,7 +933,7 @@
     const { meta, data } = await getRecording(id);
     if (act === 'base') {
       // 依目前設定重算，確保與現在的判讀一致
-      const res = A.analyzeRecording(new Float32Array(data.samples), data.calib, settings, meta.fs);
+      const res = A.analyzeRecording(new Float32Array(data.samples), data.calib, settings, meta.fs, gpsOf(data));
       baseline = { id, name: meta.name, metrics: res.metrics };
       saveJSON('sgm.baseline', baseline);
       renderRecords();
@@ -842,8 +950,9 @@
     } else if (act === 'json') {
       const out = {
         format: 'susp-gmeter', version: 1,
-        name: meta.name, created: meta.created, fs: meta.fs, calib: data.calib,
+        name: meta.name, created: meta.created, fs: meta.fs, calib: data.calib, vehicle: meta.vehicle || '',
         samples: Array.from(new Float32Array(data.samples)),
+        gps: data.gps ? Array.from(new Float32Array(data.gps)) : [],
       };
       download(`${fileSafe(meta.name)}.json`, JSON.stringify(out), 'application/json');
     }
@@ -851,13 +960,15 @@
 
   function exportCSV(meta, data) {
     const s = new Float32Array(data.samples);
-    const { series } = A.analyzeRecording(s, data.calib, settings, meta.fs);
-    const lines = ['t_ms,accG_x,accG_y,accG_z,rate_alpha,rate_beta,rate_gamma,long_g,lat_g,pitch_deg,roll_deg'];
+    const { series } = A.analyzeRecording(s, data.calib, settings, meta.fs, gpsOf(data));
+    const lines = ['t_ms,accG_x,accG_y,accG_z,rate_alpha,rate_beta,rate_gamma,long_g,lat_g,pitch_deg,roll_deg,speed_kmh'];
     for (let i = 0; i < series.t.length; i++) {
       const o = i * STRIDE;
+      const v = series.speed[i];
       lines.push([s[o].toFixed(1), s[o + 1].toFixed(4), s[o + 2].toFixed(4), s[o + 3].toFixed(4),
         s[o + 4].toFixed(3), s[o + 5].toFixed(3), s[o + 6].toFixed(3),
-        series.axg[i].toFixed(4), series.ayg[i].toFixed(4), series.pitch[i].toFixed(3), series.roll[i].toFixed(3)].join(','));
+        series.axg[i].toFixed(4), series.ayg[i].toFixed(4), series.pitch[i].toFixed(3), series.roll[i].toFixed(3),
+        isFinite(v) ? v.toFixed(1) : ''].join(','));
     }
     download(`${fileSafe(meta.name)}.csv`, lines.join('\n'), 'text/csv');
   }
@@ -925,14 +1036,17 @@
       return;
     }
     const samples = Float32Array.from(obj.samples);
+    const track = Float32Array.from(Array.isArray(obj.gps) ? obj.gps : []);
     const name = obj.name || file.name;
     try {
-      await storeRecording(samples, obj.calib, name, obj.created);
+      await storeRecording(samples, obj.calib, name, obj.created, track, obj.vehicle);
       toast('匯入完成');
     } catch (_) {
       // 這個瀏覽器不能存（例如私密模式）：不存，直接回放
       toast('這個瀏覽器無法儲存紀錄，改為直接回放（重新整理後會消失）', 6000);
-      playData({ name, fs: obj.fs || obj.calib.fs, created: obj.created }, { samples: samples.buffer, calib: obj.calib });
+      const data = { samples: samples.buffer, calib: obj.calib };
+      if (track.length) data.gps = track.buffer;
+      playData({ name, fs: obj.fs || obj.calib.fs, created: obj.created }, data);
     }
   }
 
@@ -959,7 +1073,7 @@
     saveJSON('sgm.settings', settings);
     buildProcessor();
     if (pb) {
-      const res = A.analyzeRecording(pb.samples, pb.calib, settings, pb.meta.fs);
+      const res = A.analyzeRecording(pb.samples, pb.calib, settings, pb.meta.fs, pb.track);
       pb.series = res.series;
       seek(pb.t, true);
     }
@@ -1102,7 +1216,8 @@
   $('#btnExitPlay').addEventListener('click', exitPlayback);
   $('#playSpeed').addEventListener('change', (e) => { if (pb) pb.speed = Number(e.target.value); });
   $('#scrub').addEventListener('input', (e) => { if (pb) seek(pb.duration * Number(e.target.value) / 1000); });
-  $('#chartCanvas').addEventListener('pointerdown', (e) => {
+  // 用 click 而不是 pointerdown：從曲線圖上開始捲動頁面時不會誤跳時間
+  $('#chartCanvas').addEventListener('click', (e) => {
     if (!pb) return;
     const r = e.currentTarget.getBoundingClientRect();
     const frac = (e.clientX - r.left - 44) / (r.width - 50);

@@ -1,7 +1,7 @@
 'use strict';
 
 // 離線快取：開過一次之後，沒網路也能用（例如山路）
-const CACHE = 'susp-gmeter-v3';
+const CACHE = 'susp-gmeter-v4';
 const FILES = [
   './', 'index.html', 'style.css', 'analysis.js', 'demo.js', 'app.js', 'manifest.webmanifest',
   'icon.svg', 'icon-180.png', 'icon-192.png', 'icon-512.png',
