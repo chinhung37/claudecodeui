@@ -159,6 +159,62 @@
     }
   }
 
+  // 車身俯仰/側傾超過這個角度不合理（一般車輛不到 8°），代表陀螺儀積分出錯，直接歸零
+  const MAX_BODY_DEG = 12;
+  // GPS 時速低於這個值且持續 0.5 秒，視為停車：車身傾角直接歸零
+  const STILL_KMH = 2;
+
+  // 皮爾森相關係數的累加器
+  class Corr {
+    constructor() { this.n = 0; this.sx = 0; this.sy = 0; this.sxx = 0; this.syy = 0; this.sxy = 0; }
+    add(x, y) {
+      this.n++; this.sx += x; this.sy += y; this.sxx += x * x; this.syy += y * y; this.sxy += x * y;
+    }
+    value() {
+      const n = this.n;
+      if (n < 2) return null;
+      const cov = this.sxy - this.sx * this.sy / n, vx = this.sxx - this.sx * this.sx / n, vy = this.syy - this.sy * this.sy / n;
+      return vx > 0 && vy > 0 ? cov / Math.sqrt(vx * vy) : null;
+    }
+  }
+
+  // 陀螺儀軸對應投票：各瀏覽器 rotationRate 的 alpha/beta/gamma 對應不一致。
+  // 過彎時偏航角速度與側向 G 必定同步變化（a_y = v·r），用相關係數判斷哪一種對應正確，
+  // 相關為負則代表陀螺儀正負號整體相反。
+  const AXES_CANDIDATES = ['spec', 'alt'];
+  class AxesVote {
+    constructor(R, fs) {
+      this.R = R;
+      this.fs = fs;
+      this.lpA = new Biquad('lp', 1, fs);
+      this.lpR = {};
+      this.corr = {};
+      for (const m of AXES_CANDIDATES) { this.lpR[m] = new Biquad('lp', 1, fs); this.corr[m] = new Corr(); }
+      this.count = 0;
+    }
+    // lat：未修正的側向加速度 m/s²；d：已扣零點的 rotationRate（deg/s）
+    add(lat, d) {
+      this.count++;
+      const a = this.lpA.step(lat);
+      const use = this.count > this.fs * 2 && Math.abs(a) >= 0.08 * G;
+      for (const m of AXES_CANDIDATES) {
+        const yaw = this.lpR[m].step(dot(this.R[2], gyroDevice(d[0], d[1], d[2], m)));
+        if (use) this.corr[m].add(yaw, a);
+      }
+    }
+    // 過彎資料夠多且結果明確時回傳 { mapping, sign }，否則 null
+    decide() {
+      const n = this.corr.spec.n;
+      if (n < this.fs * 3) return null;
+      const scored = AXES_CANDIDATES.map((m) => ({ m, c: this.corr[m].value() }))
+        .filter((x) => x.c != null)
+        .sort((a, b) => Math.abs(b.c) - Math.abs(a.c));
+      if (!scored.length || Math.abs(scored[0].c) < 0.6) return null;
+      if (scored[1] && Math.abs(scored[1].c) > Math.abs(scored[0].c) - 0.3) return null;
+      return { mapping: scored[0].m, sign: scored[0].c > 0 ? 1 : -1, corr: scored[0].c };
+    }
+  }
+
   class Processor {
     // calib: { R, gMag, gyroBias:[alpha,beta,gamma], hasGyro }
     // settings: 幾何、翻轉、陀螺儀軸對應、rideGate…
@@ -176,6 +232,14 @@
       };
       this.lpAx = new Biquad('lp', 2, fs);
       this.lpAy = new Biquad('lp', 2, fs);
+      // 判斷「車身回到中立」用未經姿態修正的加速度，避免姿態算錯時自己卡住
+      this.lpFx = new Biquad('lp', 2, fs);
+      this.lpFy = new Biquad('lp', 2, fs);
+      // 陀螺儀軸對應：auto 先用標準對應，過彎資料夠了再自動判斷
+      const axes = settings.gyroAxes || 'auto';
+      this.axesAuto = axes === 'auto';
+      this.axes = { mapping: this.axesAuto ? 'spec' : axes, sign: 1, decided: !this.axesAuto, corr: null };
+      this.vote = this.axesAuto && calib.hasGyro ? new AxesVote(calib.R, fs) : null;
       // 垂直加速度與角速度走同一個低通，四輪投影時相位才對得上
       this.lpP = new Biquad('lp', 20, fs);
       this.lpQ = new Biquad('lp', 20, fs);
@@ -201,6 +265,15 @@
       this.speedMax = null;
       this.count = 0;
       this.duration = 0;
+      this.still = 0;
+      this.anomalies = 0;
+    }
+
+    // 姿態積分歸零（換軸對應或角度不合理時）
+    resetAttitude() {
+      this.rollInt = 0; this.pitchInt = 0;
+      this.refRoll = 0; this.refPitch = 0;
+      this.roll = 0; this.pitch = 0;
     }
 
     // 只清統計，保留濾波器/角度狀態（給「重設統計」按鈕用）
@@ -228,19 +301,43 @@
 
       let p = 0, q = 0, r = 0;
       if (hasGyro) {
-        const w = toCar(R, gyroDevice(ra - gyroBias[0], rb - gyroBias[1], rg - gyroBias[2], this.s.gyroMap));
+        const d = [ra - gyroBias[0], rb - gyroBias[1], rg - gyroBias[2]];
+        if (this.vote) {
+          this.vote.add(f[1], d);
+          const v = this.vote.decide();
+          if (v) {
+            const changed = v.mapping !== this.axes.mapping || v.sign !== this.axes.sign;
+            this.axes = { mapping: v.mapping, sign: v.sign, decided: true, corr: v.corr };
+            this.vote = null;
+            // 之前用錯的對應算出來的姿態與統計都不可信，清掉重來
+            if (changed) { this.resetAttitude(); this.resetStats(); }
+          }
+        }
+        const sgn = this.axes.sign;
+        const w = toCar(R, gyroDevice(d[0] * sgn, d[1] * sgn, d[2] * sgn, this.axes.mapping));
         p = w[0] * sg.roll; q = w[1] * sg.pitch; r = w[2];
       }
+
+      // 停車（GPS 時速接近 0）超過 0.5 秒：車身沒有在動，傾角直接拉回 0
+      const kmhNow = speed != null && isFinite(speed) && speed >= 0 ? speed * 3.6 : null;
+      this.still = kmhNow != null && kmhNow < STILL_KMH ? this.still + dt : 0;
+      const stopped = this.still > 0.5;
 
       // 姿態：陀螺儀積分；車身回到「無加減速、無側向 G」時把參考點拉回，消除漂移
       this.rollInt += p * dt;
       this.pitchInt += q * dt;
-      const neutral = Math.abs(this.axF) < GATE.neutral * G && Math.abs(this.ayF) < GATE.neutral * G;
-      const k = neutral ? Math.min(1, dt / 0.5) : Math.min(1, dt / 30);
+      const fxF = this.lpFx.step(fx), fyF = this.lpFy.step(fy);
+      const neutral = Math.abs(fxF) < GATE.neutral * G && Math.abs(fyF) < GATE.neutral * G;
+      const k = stopped ? Math.min(1, dt / 0.2) : neutral ? Math.min(1, dt / 0.5) : Math.min(1, dt / 30);
       this.refRoll += (this.rollInt - this.refRoll) * k;
       this.refPitch += (this.pitchInt - this.refPitch) * k;
       this.roll = this.rollInt - this.refRoll;
       this.pitch = this.pitchInt - this.refPitch;
+      if (Math.abs(this.roll) > MAX_BODY_DEG / DEG || Math.abs(this.pitch) > MAX_BODY_DEG / DEG) {
+        this.anomalies++;
+        this.refRoll = this.rollInt; this.refPitch = this.pitchInt;
+        this.roll = 0; this.pitch = 0;
+      }
 
       // 車身傾斜會讓重力分量混進縱/橫向 G，用姿態扣掉
       const axTrue = fx + G * Math.sin(this.pitch);
@@ -250,7 +347,7 @@
       const axg = this.axF / G, ayg = this.ayF / G;
       const pitchDeg = this.pitch * DEG, rollDeg = this.roll * DEG;
 
-      if (hasGyro) {
+      if (hasGyro && !stopped) {
         if (Math.abs(axg) >= GATE.longMin && Math.abs(ayg) < GATE.longCrossMax) {
           if (axg < 0) this.grad.dive.add(-axg, pitchDeg);
           else this.grad.squat.add(axg, -pitchDeg);
@@ -302,7 +399,9 @@
         yawDeg: r * DEG,
         speedKmh: kmh,
         moving,
+        stopped,
         hasGyro,
+        axes: this.axes,
       };
     }
 
@@ -344,6 +443,8 @@
         rideBands,
         speedMax: this.speedMax,
         duration: this.duration,
+        axes: this.calib.hasGyro ? this.axes : null,
+        anomalies: this.anomalies,
       };
     }
   }
@@ -494,7 +595,7 @@
 
   return {
     G, STRIDE, GATE, CORNERS, FORWARD_PRESETS, RIDE_LO, RIDE_HI,
-    SPEED_BANDS, GPS_STALE_MS, GPS_STRIDE,
+    SPEED_BANDS, GPS_STALE_MS, GPS_STRIDE, MAX_BODY_DEG, STILL_KMH,
     buildFrame, toCar, gyroDevice, cornerOffsets,
     Biquad, Processor, ForwardDetector, SpeedTrack,
     hardness, vsBaseline, compareRide, speedBand,
