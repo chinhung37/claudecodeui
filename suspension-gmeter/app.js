@@ -1102,7 +1102,8 @@
   $('#btnExitPlay').addEventListener('click', exitPlayback);
   $('#playSpeed').addEventListener('change', (e) => { if (pb) pb.speed = Number(e.target.value); });
   $('#scrub').addEventListener('input', (e) => { if (pb) seek(pb.duration * Number(e.target.value) / 1000); });
-  $('#chartCanvas').addEventListener('pointerdown', (e) => {
+  // 用 click 而不是 pointerdown：從曲線圖上開始捲動頁面時不會誤跳時間
+  $('#chartCanvas').addEventListener('click', (e) => {
     if (!pb) return;
     const r = e.currentTarget.getBoundingClientRect();
     const frac = (e.clientX - r.left - 44) / (r.width - 50);

@@ -81,7 +81,8 @@ main {
   margin-bottom: 12px;
 }
 
-canvas { display: block; width: 100%; touch-action: none; }
+/* 畫布佔了即時頁大半面積，手指放在上面也要能上下捲動 */
+canvas { display: block; width: 100%; touch-action: manipulation; }
 .car { aspect-ratio: 1 / 1.2; }
 .gball { aspect-ratio: 1 / 1; max-width: 220px; }
 .chart { aspect-ratio: 2 / 1; margin-bottom: 8px; }
