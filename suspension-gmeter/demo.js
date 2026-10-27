@@ -68,10 +68,11 @@
       const tr = ay > 0 ? car.rollL * ay : car.rollR * ay;
       pitch += (tp / DEG - pitch) * dt / 0.12;
       roll += (tr / DEG - roll) * dt / 0.12;
-      // 路面：車身起伏（低頻）＋ 路面細震（高頻），前輪較硬、後輪較軟
+      // 路面：車身起伏（低頻）＋ 路面細震（高頻）
       const heave = moving ? 0.55 * Math.sin(2 * Math.PI * 1.25 * t) + 0.25 * Math.sin(2 * Math.PI * 0.8 * t + 1) : 0;
       const hiZ = moving ? road * 0.69 * Math.sin(2 * Math.PI * 9 * t) : 0;
-      const pOsc = moving ? road * 0.00004 * Math.sin(2 * Math.PI * 9 * t) + 0.0012 * Math.sin(2 * Math.PI * 1.6 * t) : 0;
+      // 車身俯仰擺動（1.6 Hz）讓後軸上下動得比前軸多 = 後軟；9 Hz 是手機在支架上的小晃動
+      const pOsc = moving ? road * 0.00004 * Math.sin(2 * Math.PI * 9 * t) + 0.004 * Math.sin(2 * Math.PI * 1.6 * t) : 0;
       const rOsc = moving ? 0.0003 * Math.sin(2 * Math.PI * 7 * t) : 0;
       const pAng = pitch + pOsc, rAng = roll + rOsc;
       const q = i ? (pAng - pPrev) / dt : 0;

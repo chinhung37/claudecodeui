@@ -101,14 +101,20 @@
 
   // 過原點的線性回歸：角度 = 斜率 × g，斜率即 deg/g
   class Gradient {
-    constructor() { this.sxx = 0; this.sxy = 0; this.n = 0; }
-    add(x, y) { this.sxx += x * x; this.sxy += x * y; this.n++; }
+    constructor() { this.sxx = 0; this.sxy = 0; this.syy = 0; this.n = 0; this.xMax = 0; }
+    add(x, y) { this.sxx += x * x; this.sxy += x * y; this.syy += y * y; this.n++; this.xMax = Math.max(this.xMax, x); }
     value(minN) { return this.n >= minN && this.sxx > 0 ? this.sxy / this.sxx : null; }
+    // 過原點回歸的 R²：角度有多少比例能用「G 值 × 斜率」解釋
+    r2() { return this.sxx > 0 && this.syy > 0 ? (this.sxy * this.sxy) / (this.sxx * this.syy) : null; }
   }
 
   // 低頻 0.5–3 Hz（車身起伏）與高頻 4–15 Hz（路面傳入的硬度）
   const RIDE_LO = [0.5, 3];
   const RIDE_HI = [4, 15];
+  // 四輪投影用的低通（Hz）：涵蓋車身擺動，避開手機在支架上的晃動
+  const PROJ_HZ = 3.5;
+  // deg/g 回歸的 R² 低於這個值，代表角度大多不是 G 值造成的（路面起伏、雜訊），不予判讀
+  const MIN_R2 = 0.5;
 
   // 四輪相對手機的位置（公尺，車身座標）
   function cornerOffsets(s) {
@@ -159,8 +165,8 @@
     }
   }
 
-  // 車身俯仰/側傾超過這個角度不合理（一般車輛不到 8°），代表陀螺儀積分出錯，直接歸零
-  const MAX_BODY_DEG = 12;
+  // 車身俯仰/側傾超過這個角度不合理（一般車輛過彎、煞車都在 6–7° 以內），代表陀螺儀積分出錯，直接歸零
+  const MAX_BODY_DEG = 8;
   // GPS 時速低於這個值且持續 0.5 秒，視為停車：車身傾角直接歸零
   const STILL_KMH = 2;
 
@@ -179,8 +185,9 @@
   }
 
   // 陀螺儀軸對應投票：各瀏覽器 rotationRate 的 alpha/beta/gamma 對應不一致。
-  // 過彎時偏航角速度與側向 G 必定同步變化（a_y = v·r），用相關係數判斷哪一種對應正確，
-  // 相關為負則代表陀螺儀正負號整體相反。
+  // 過彎時偏航角速度與側向 G 必定同步變化（a_y = v·r），用相關係數判斷哪一種對應正確。
+  // 只接受正相關：實車資料（替代軸序的手機）裡，標準對應的相關是 −0.78，
+  // 若允許「正負號相反」，錯的對應反而會被選中。
   const AXES_CANDIDATES = ['spec', 'alt'];
   class AxesVote {
     constructor(R, fs) {
@@ -202,16 +209,16 @@
         if (use) this.corr[m].add(yaw, a);
       }
     }
-    // 過彎資料夠多且結果明確時回傳 { mapping, sign }，否則 null
+    // 過彎資料夠多且結果明確時回傳 { mapping, sign, corr }，否則 null
     decide() {
       const n = this.corr.spec.n;
       if (n < this.fs * 3) return null;
       const scored = AXES_CANDIDATES.map((m) => ({ m, c: this.corr[m].value() }))
         .filter((x) => x.c != null)
-        .sort((a, b) => Math.abs(b.c) - Math.abs(a.c));
-      if (!scored.length || Math.abs(scored[0].c) < 0.6) return null;
-      if (scored[1] && Math.abs(scored[1].c) > Math.abs(scored[0].c) - 0.3) return null;
-      return { mapping: scored[0].m, sign: scored[0].c > 0 ? 1 : -1, corr: scored[0].c };
+        .sort((a, b) => b.c - a.c);
+      if (!scored.length || scored[0].c < 0.6) return null;
+      if (scored[1] && scored[1].c > scored[0].c - 0.3) return null;
+      return { mapping: scored[0].m, sign: 1, corr: scored[0].c };
     }
   }
 
@@ -223,6 +230,8 @@
       this.s = settings;
       this.fs = fs;
       this.minN = Math.max(10, Math.round(fs * 1));
+      // deg/g 至少要 2 秒符合條件的資料才算（1 秒的彎道太容易被單一路況帶偏）
+      this.gradMinN = Math.max(10, Math.round(fs * 2));
       this.offsets = cornerOffsets(settings);
       this.signs = {
         long: settings.flipLong ? -1 : 1,
@@ -240,14 +249,15 @@
       this.axesAuto = axes === 'auto';
       this.axes = { mapping: this.axesAuto ? 'spec' : axes, sign: 1, decided: !this.axesAuto, corr: null };
       this.vote = this.axesAuto && calib.hasGyro ? new AxesVote(calib.R, fs) : null;
-      // 垂直加速度與角速度走同一個低通，四輪投影時相位才對得上
-      this.lpP = new Biquad('lp', 20, fs);
-      this.lpQ = new Biquad('lp', 20, fs);
-      this.lpZ = new Biquad('lp', 20, fs);
+      // 四輪投影只用低頻：實車資料裡陀螺儀 4–15 Hz 主要是手機在支架上晃（比車身擺動大好幾倍），
+      // 拿去推算 1 公尺外的輪子會被放大成假的震動。垂直加速度與角速度走同一個低通，相位才對得上。
+      this.lpP = new Biquad('lp', PROJ_HZ, fs);
+      this.lpQ = new Biquad('lp', PROJ_HZ, fs);
+      this.lpZ = new Biquad('lp', PROJ_HZ, fs);
       this.bands = {};
-      for (const c of CORNERS) {
-        this.bands[c] = { lo: new Band(RIDE_LO[0], RIDE_LO[1], fs), hi: new Band(RIDE_HI[0], RIDE_HI[1], fs) };
-      }
+      for (const c of CORNERS) this.bands[c] = new Band(RIDE_LO[0], RIDE_LO[1], fs);
+      // 高頻（路面傳入）用手機位置的實測值，四輪共用
+      this.hiBand = new Band(RIDE_HI[0], RIDE_HI[1], fs);
       this.reset();
     }
 
@@ -318,16 +328,17 @@
         p = w[0] * sg.roll; q = w[1] * sg.pitch; r = w[2];
       }
 
-      // 停車（GPS 時速接近 0）超過 0.5 秒：車身沒有在動，傾角直接拉回 0
-      const kmhNow = speed != null && isFinite(speed) && speed >= 0 ? speed * 3.6 : null;
-      this.still = kmhNow != null && kmhNow < STILL_KMH ? this.still + dt : 0;
-      const stopped = this.still > 0.5;
-
       // 姿態：陀螺儀積分；車身回到「無加減速、無側向 G」時把參考點拉回，消除漂移
       this.rollInt += p * dt;
       this.pitchInt += q * dt;
       const fxF = this.lpFx.step(fx), fyF = this.lpFy.step(fy);
       const neutral = Math.abs(fxF) < GATE.neutral * G && Math.abs(fyF) < GATE.neutral * G;
+
+      // 停車：GPS 時速接近 0 而且沒有加減速，持續 0.5 秒，傾角直接拉回 0。
+      // GPS 約一秒才更新一次，起步的頭一秒還會是 0，所以一定要同時看 G 值。
+      const kmhNow = speed != null && isFinite(speed) && speed >= 0 ? speed * 3.6 : null;
+      this.still = kmhNow != null && kmhNow < STILL_KMH && neutral ? this.still + dt : 0;
+      const stopped = this.still > 0.5;
       const k = stopped ? Math.min(1, dt / 0.2) : neutral ? Math.min(1, dt / 0.5) : Math.min(1, dt / 30);
       this.refRoll += (this.rollInt - this.refRoll) * k;
       this.refPitch += (this.pitchInt - this.refPitch) * k;
@@ -358,20 +369,19 @@
         }
       }
 
-      // 四輪垂直加速度：剛體投影 a_z + ṗ·dy − q̇·dx
+      // 四輪低頻垂直加速度：剛體投影 a_z + ṗ·dy − q̇·dx
       // 後向差分落在兩個取樣中間，垂直加速度也取前後平均對齊這半個取樣
       const pF = this.lpP.step(p), qF = this.lpQ.step(q), zF = this.lpZ.step(fz);
       const dp = (pF - this.pPrev) / dt, dq = (qF - this.qPrev) / dt;
       const zMid = (zF + this.zPrev) / 2;
       this.pPrev = pF; this.qPrev = qF; this.zPrev = zF;
+      const hi = this.hiBand.step(fz);
       const warm = this.count > this.fs * 2;
       let gateSum = 0;
       const vals = {};
       for (const c of CORNERS) {
         const [dx, dy] = this.offsets[c];
-        const z = zMid + dp * dy - dq * dx;
-        const lo = this.bands[c].lo.step(z);
-        const hi = this.bands[c].hi.step(z);
+        const lo = this.bands[c].step(zMid + dp * dy - dq * dx);
         vals[c] = [lo, hi];
         gateSum += lo * lo + hi * hi;
       }
@@ -431,14 +441,17 @@
       });
       const g = this.grad;
       return {
-        dive: g.dive.value(this.minN),
-        squat: g.squat.value(this.minN),
-        rollL: g.rollL.value(this.minN),
-        rollR: g.rollR.value(this.minN),
+        dive: g.dive.value(this.gradMinN),
+        squat: g.squat.value(this.gradMinN),
+        rollL: g.rollL.value(this.gradMinN),
+        rollR: g.rollR.value(this.gradMinN),
         seconds: {
           dive: g.dive.n / this.fs, squat: g.squat.n / this.fs,
           rollL: g.rollL.n / this.fs, rollR: g.rollR.n / this.fs,
         },
+        r2: { dive: g.dive.r2(), squat: g.squat.r2(), rollL: g.rollL.r2(), rollR: g.rollR.r2() },
+        // 用到的最大 G 值：太小（溫和駕駛）時角度跟路面起伏分不開
+        gMax: { dive: g.dive.xMax, squat: g.squat.xMax, rollL: g.rollL.xMax, rollR: g.rollR.xMax },
         ride,
         rideBands,
         speedMax: this.speedMax,
@@ -595,7 +608,7 @@
 
   return {
     G, STRIDE, GATE, CORNERS, FORWARD_PRESETS, RIDE_LO, RIDE_HI,
-    SPEED_BANDS, GPS_STALE_MS, GPS_STRIDE, MAX_BODY_DEG, STILL_KMH,
+    SPEED_BANDS, GPS_STALE_MS, GPS_STRIDE, MAX_BODY_DEG, STILL_KMH, PROJ_HZ, MIN_R2,
     buildFrame, toCar, gyroDevice, cornerOffsets,
     Biquad, Processor, ForwardDetector, SpeedTrack,
     hardness, vsBaseline, compareRide, speedBand,
