@@ -9,7 +9,8 @@
     wheelbase: 2700, trackF: 1550, trackR: 1550, phoneX: 1100, phoneY: 0,
     rollSoft: 6, rollHard: 2, pitchSoft: 4, pitchHard: 1.5,
     rideSoft: 0.4, rideHard: 1.2, rideGate: 0.2,
-    useBaseline: false, gyroMap: 'spec',
+    // 舊版存的 gyroMap 不再使用：各手機不同，改成預設自動判斷
+    useBaseline: false, gyroAxes: 'auto',
     flipLong: false, flipLat: false, flipPitch: false, flipRoll: false,
   };
   const NUM_KEYS = ['wheelbase', 'trackF', 'trackR', 'phoneX', 'phoneY', 'rollSoft', 'rollHard',
@@ -413,6 +414,8 @@
   function judge(kind, value, baseKey) {
     // kind: 'roll' | 'pitch' | 'ride'
     if (value == null) return { level: null, text: '資料不足', short: '資料不足' };
+    // 煞車時車頭上揚、過彎時往內側傾，物理上不合理：多半是方向或陀螺儀軸設錯，不能當成「硬」
+    if (kind !== 'ride' && value <= 0) return { level: null, text: '數值異常', short: '異常', note: '檢查方向修正' };
     const lowerIsHarder = kind !== 'ride';
     if (settings.useBaseline && baseline) {
       return judgePct(A.vsBaseline(value, baseKey(baseline.metrics), lowerIsHarder), '');
@@ -649,9 +652,23 @@
       const live = r && r.live != null ? `<br><span class="muted small">即時 ${r.live.toFixed(2)}</span>` : '';
       rows.push(row(`${CORNER_NAME[c]}<br><span class="muted small">路感比</span>`, `${fmt(r && r.ratio, 2)}${live}`, j, r ? r.seconds : 0));
     }
+    rows.push(axesRow(m));
     $('#metricsBody').innerHTML = rows.join('');
     drawBands(m);
   }
+  // 陀螺儀軸對應的判斷狀態，以及傾角不合理被重設的次數
+  function axesRow(m) {
+    const ax = m && m.axes;
+    if (!ax) return '';
+    const name = ax.mapping === 'alt' ? '替代' : '標準';
+    const val = ax.decided
+      ? `${name}${ax.sign < 0 ? '、正負相反' : ''}${ax.corr != null ? `<br><span class="muted small">相關 ${ax.corr.toFixed(2)}</span>` : ''}`
+      : '自動判斷中<br><span class="muted small">需要約 3 秒的彎道</span>';
+    const reset = m.anomalies ? `傾角異常重設 ${m.anomalies} 次` : '正常';
+    const j = { level: m.anomalies ? null : 'mid', text: reset };
+    return `<tr><td>陀螺儀軸</td><td>${val}</td><td><span class="tag" style="background:${levelColor(j)}">${j.text}</span></td><td></td></tr>`;
+  }
+
   function row(name, val, j, sec) {
     const note = j.note ? `<br><span class="muted small">${j.note}</span>` : '';
     return `<tr><td>${name}</td><td class="num">${val}</td>` +
@@ -907,9 +924,10 @@
   }
   function gyroAdvice(gc) {
     if (gc.spec == null && gc.alt == null) return '（彎道不夠，無法判斷）';
-    const s = gc.spec ?? -1, a = gc.alt ?? -1;
-    if (s > 0.6 && s > a) return '（目前「標準」合理）';
-    if (a > 0.6 && a > s) return '（建議改用「替代」）';
+    const s = gc.spec ?? 0, a = gc.alt ?? 0;
+    // 相關係數接近 −1 代表軸對了但正負號相反，自動模式也會處理
+    if (Math.abs(s) > 0.6 && Math.abs(s) > Math.abs(a)) return `（這支手機是「標準」${s < 0 ? '、正負相反' : ''}）`;
+    if (Math.abs(a) > 0.6 && Math.abs(a) > Math.abs(s)) return `（這支手機是「替代」${a < 0 ? '、正負相反' : ''}）`;
     return '（無法判斷）';
   }
   function esc(s) {
@@ -1055,7 +1073,7 @@
     const f = $('#settingsForm');
     for (const k of NUM_KEYS) f.elements[k].value = settings[k];
     for (const k of BOOL_KEYS) f.elements[k].checked = !!settings[k];
-    f.elements.gyroMap.value = settings.gyroMap;
+    f.elements.gyroAxes.value = settings.gyroAxes;
   }
   function readSettings() {
     const f = $('#settingsForm');
@@ -1065,7 +1083,7 @@
       s[k] = isFinite(v) ? v : DEFAULT_SETTINGS[k];
     }
     for (const k of BOOL_KEYS) s[k] = f.elements[k].checked;
-    s.gyroMap = f.elements.gyroMap.value;
+    s.gyroAxes = f.elements.gyroAxes.value;
     return s;
   }
   function applySettings(s) {

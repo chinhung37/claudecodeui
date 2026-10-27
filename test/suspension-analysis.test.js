@@ -17,7 +17,7 @@ function toDevice(R, v) {
 
 const SETTINGS = {
   wheelbase: 2700, trackF: 1550, trackR: 1550, phoneX: 1350, phoneY: 0,
-  rideGate: 0.05, gyroMap: 'spec',
+  rideGate: 0.05, gyroAxes: 'spec',
   flipLong: false, flipLat: false, flipPitch: false, flipRoll: false,
 };
 
@@ -169,6 +169,66 @@ test('compareRide 沒有共同時速段時退回整體比值', () => {
   assert.ok(Math.abs(r.pct) < 1e-9);
   assert.equal(noGps.speedMax, null);
   assert.equal(withGps.speedMax, 72);
+});
+
+// 有偏航的過彎＋煞車到停。order：手機 rotationRate 的軸序；gyroSign：陀螺儀整體正負號
+function simulateTurnsAndStop(order, gyroSign) {
+  const fs = 60;
+  const out = [], gps = [];
+  let pitch = 0, roll = 0, pp = 0, pr = 0;
+  for (let i = 0; i < 50 * fs; i++) {
+    const t = i / fs;
+    let ax = 0, ay = 0;
+    if (t >= 5 && t < 11) ay = 0.4;
+    if (t >= 14 && t < 20) ay = -0.4;
+    if (t >= 24 && t < 27) ax = -0.5;
+    const kmh = t < 24 ? 45 : t < 27 ? 45 * (27 - t) / 3 : 0;
+    if (i % fs === 0) gps.push(t * 1000, kmh / 3.6);
+    pitch += ((ax < 0 ? 2.5 * -ax : 0) / DEG - pitch) / fs / 0.12;
+    roll += (4 * ay / DEG - roll) / fs / 0.12;
+    const q = i ? (pitch - pp) * fs : 0, p = i ? (roll - pr) * fs : 0;
+    pp = pitch; pr = roll;
+    const r = kmh > 0 ? ay * G / (kmh / 3.6) : 0;
+    const f = toDevice(R_TRUE, [ax * G - G * Math.sin(pitch), ay * G + G * Math.sin(roll), G]);
+    const w = toDevice(R_TRUE, [p, q, r]).map((x) => x * DEG * gyroSign);
+    // 規範：alpha=z、beta=x、gamma=y；替代：alpha=x、beta=y、gamma=z
+    const rate = order === 'alt' ? [w[0], w[1], w[2]] : [w[2], w[0], w[1]];
+    out.push(t * 1000, f[0], f[1], f[2], ...rate);
+  }
+  return { samples: Float64Array.from(out), gps: Float32Array.from(gps), fs };
+}
+
+for (const [order, sign, label] of [['spec', 1, '標準軸序'], ['alt', 1, '替代軸序'], ['spec', -1, '標準軸序但正負號相反']]) {
+  test(`陀螺儀軸對應自動判斷：${label}`, () => {
+    const d = simulateTurnsAndStop(order, sign);
+    const settings = { ...SETTINGS, gyroAxes: 'auto' };
+    const { metrics } = A.analyzeRecording(d.samples, calibFor(R_TRUE), settings, d.fs, d.gps);
+    assert.equal(metrics.axes.decided, true);
+    assert.equal(metrics.axes.mapping, order);
+    assert.equal(metrics.axes.sign, sign);
+    // 判斷出來之前的資料會清掉，右彎在判斷之後，應能估回 4 deg/g
+    assert.ok(Math.abs(metrics.rollR - 4) < 0.6, `rollR=${metrics.rollR}`);
+    assert.ok(Math.abs(metrics.dive - 2.5) < 0.4, `dive=${metrics.dive}`);
+  });
+}
+
+test('軸對應設錯時：停車後橫向 G 1 秒內歸零（不會卡在假的側傾）', () => {
+  const d = simulateTurnsAndStop('alt', 1);
+  const settings = { ...SETTINGS, gyroAxes: 'spec' };
+  const { series, metrics } = A.analyzeRecording(d.samples, calibFor(R_TRUE), settings, d.fs, d.gps);
+  for (let i = 0; i < series.t.length; i++) {
+    if (series.t[i] < 28000) continue;
+    assert.ok(Math.abs(series.axg[i]) < 0.03 && Math.abs(series.ayg[i]) < 0.03, `t=${series.t[i]} ${series.axg[i]}/${series.ayg[i]}`);
+    assert.ok(Math.abs(series.roll[i]) <= A.MAX_BODY_DEG && Math.abs(series.pitch[i]) <= A.MAX_BODY_DEG);
+  }
+  assert.ok(metrics.anomalies > 0, '應記錄到不合理的傾角');
+});
+
+test('GPS 顯示停車時，車身傾角很快歸零', () => {
+  const d = simulateTurnsAndStop('spec', 1);
+  const { series } = A.analyzeRecording(d.samples, calibFor(R_TRUE), { ...SETTINGS, gyroAxes: 'spec' }, d.fs, d.gps);
+  const i = series.t.findIndex((t) => t >= 29000);
+  assert.ok(Math.abs(series.pitch[i]) < 0.1 && Math.abs(series.roll[i]) < 0.1);
 });
 
 test('沒有在動（低於門檻）時不累積路感統計', () => {
