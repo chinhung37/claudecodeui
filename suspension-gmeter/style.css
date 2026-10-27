@@ -134,6 +134,10 @@ table.metrics { width: 100%; border-collapse: collapse; font-size: 16px; }
 .metrics th, .metrics td { padding: 7px 4px; border-bottom: 1px solid var(--line); text-align: left; }
 .metrics th { color: var(--muted); font-weight: 500; }
 .metrics td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.card-title { margin: 0 0 4px; font-size: 18px; }
+.table-wrap { overflow-x: auto; }
+#bandsTable td, #bandsTable th { text-align: center; }
+#bandsTable td:first-child, #bandsTable th:first-child { text-align: left; }
 .tag { white-space: nowrap; display: inline-block; padding: 3px 11px; border-radius: 999px; color: #fff; font-size: 15px; font-weight: 800; }
 
 .settings label { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; }

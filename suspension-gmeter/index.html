@@ -49,6 +49,7 @@
           <div><span class="lbl">橫向</span><span id="roLat" class="big">0.00</span><span class="unit">g</span></div>
           <div><span class="lbl">俯仰</span><span id="roPitch" class="big">0.0</span><span class="unit">°</span></div>
           <div><span class="lbl">側傾</span><span id="roRoll" class="big">0.0</span><span class="unit">°</span></div>
+          <div><span class="lbl">時速</span><span id="roSpeed" class="big">—</span><span class="unit">km/h</span></div>
         </div>
       </div>
       <div class="muted small hint">縱向 + = 加速、− = 煞車；橫向 + = 左彎；俯仰 + = 車頭下沉；側傾 + = 車身往右傾。G 球的點 = 身體感受到的力（煞車往上、左彎往右）。</div>
@@ -82,6 +83,12 @@
           <thead><tr><th>項目</th><th>數值</th><th>判讀</th><th>樣本</th></tr></thead>
           <tbody id="metricsBody"></tbody>
         </table>
+      </div>
+
+      <div id="bandsCard" class="card hidden">
+        <h3 class="card-title">路感比・依 GPS 時速分段</h3>
+        <p class="muted small">車速越快，路面傳上來的高頻震動越多。比較兩段紀錄時，請看同一個時速段。<span id="speedMax"></span></p>
+        <div class="table-wrap"><table id="bandsTable" class="metrics"></table></div>
       </div>
     </section>
 
@@ -152,7 +159,7 @@
         <ol>
           <li>手機用<b>硬式支架</b>固定在車上（軟爛支架會自己共振，路感比會失真）。</li>
           <li>到「設定」填軸距、輪距、手機位置。</li>
-          <li>按「啟動感測器」（iPhone 會跳出動作感應權限，要允許）。</li>
+          <li>按「啟動感測器」（iPhone 會跳出動作感應權限，要允許；接著會問位置權限，用來取得 GPS 時速，也建議允許）。</li>
           <li>車停好、引擎可以發動，按「校正」，第一步保持靜止 3 秒。</li>
           <li>第二步選前方：手機螢幕朝向駕駛就選「螢幕朝駕駛」；否則選「自動」，然後<b>直線起步加速</b>。</li>
           <li>校正後檢查：煞車時 G 球往上、左轉時 G 球往右；壓車頭俯仰為 +、壓右側側傾為 +。不對就到設定勾反向。</li>
@@ -165,6 +172,7 @@
           <li><b>左 = 右彎側傾 deg/g</b>：右彎時左側是外側、被壓縮。越大越軟。</li>
           <li><b>右 = 左彎側傾 deg/g</b>：左彎時右側被壓縮。</li>
           <li><b>四輪路感比</b> = 該輪位置垂直加速度 4–15 Hz 能量 ÷ 0.5–3 Hz 能量。比值越大 = 路面震動傳上來越多、車身起伏越少 = 越硬。</li>
+          <li><b>時速分段</b>：車速越快，路感比通常越大。有 GPS 時速時，路感比會另外分成 0–30、30–60、60 以上 km/h 三段；與基準比較也只比同一時速段（標示「同時速段」）。沒有 GPS 的紀錄只能整段比（標示「未分時速」）。</li>
         </ul>
         <h3>限制（請一定要看）</h3>
         <ul>
@@ -174,6 +182,7 @@
           <li>判讀門檻的預設值是經驗值，<b>未驗證</b>。最可靠的用法是：調整前錄一段 → 設為基準 → 調整後同一路線再錄 → 開「與基準比較」。</li>
           <li>不同手機的陀螺儀軸定義可能不同（未驗證每款手機）。紀錄詳情裡的「陀螺儀軸檢查」會告訴你哪個對應比較合理。</li>
           <li>螢幕關掉或切到別的 App 時，瀏覽器會停止送感測資料；記錄中請保持畫面開著。</li>
+          <li>GPS 大約每秒更新一次，隧道、地下道、高樓之間會沒有時速；超過 3 秒沒更新就當作不知道，那段不列入分段統計。</li>
         </ul>
       </div>
     </section>

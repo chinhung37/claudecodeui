@@ -126,6 +126,51 @@ test('示範資料：各項指標都有值，陀螺儀軸檢查判定標準對�
   assert.ok(A.gyroCheck(d.samples, d.calib, d.fs).spec > 0.9);
 });
 
+test('SpeedTrack 沿用最近一筆時速，超過 3 秒沒更新就當不知道', () => {
+  const s = new A.SpeedTrack(Float32Array.from([0, 10, 1000, 20]));
+  assert.equal(s.at(-1), null);
+  assert.equal(s.at(500), 10);
+  assert.equal(s.at(1500), 20);
+  assert.equal(s.at(4001), null);
+  assert.equal(new A.SpeedTrack(null).at(0), null);
+});
+
+test('speedBand 依 km/h 分段', () => {
+  assert.equal(A.speedBand(0), 0);
+  assert.equal(A.speedBand(29.9), 0);
+  assert.equal(A.speedBand(30), 1);
+  assert.equal(A.speedBand(60), 2);
+  assert.equal(A.speedBand(null), -1);
+});
+
+test('同一台車只錄低速段：不分車速比會誤判變軟，分時速段比較則接近 0%', () => {
+  const D = require('../suspension-gmeter/demo');
+  const d = D.simulateDrive();
+  const settings = { ...SETTINGS, phoneX: 1100, rideGate: 0.2 };
+  const base = A.analyzeRecording(d.samples, d.calib, settings, d.fs, d.gps).metrics;
+  const cur = A.analyzeRecording(d.samples.subarray(0, 35 * d.fs * A.STRIDE), d.calib, settings, d.fs,
+    d.gps.subarray(0, 36 * A.GPS_STRIDE)).metrics;
+  for (const c of A.CORNERS) {
+    const naive = A.vsBaseline(cur.ride[c].ratio, base.ride[c].ratio, false);
+    const matched = A.compareRide(cur, base, c);
+    assert.ok(naive < -8, `${c} 不分車速：${naive}`);
+    assert.ok(matched.matched && Math.abs(matched.pct) < 5, `${c} 分段：${matched.pct}`);
+  }
+});
+
+test('compareRide 沒有共同時速段時退回整體比值', () => {
+  const D = require('../suspension-gmeter/demo');
+  const d = D.simulateDrive();
+  const settings = { ...SETTINGS, phoneX: 1100, rideGate: 0.2 };
+  const withGps = A.analyzeRecording(d.samples, d.calib, settings, d.fs, d.gps).metrics;
+  const noGps = A.analyzeRecording(d.samples, d.calib, settings, d.fs, null).metrics;
+  const r = A.compareRide(noGps, withGps, 'FL');
+  assert.equal(r.matched, false);
+  assert.ok(Math.abs(r.pct) < 1e-9);
+  assert.equal(noGps.speedMax, null);
+  assert.equal(withGps.speedMax, 72);
+});
+
 test('沒有在動（低於門檻）時不累積路感統計', () => {
   const samples = simulate(10, () => ({ ax: 0, ay: 0 }), { dive: 0, squat: 0, rollL: 0, rollR: 0 });
   const { metrics } = A.analyzeRecording(samples, calibFor(R_TRUE), SETTINGS, FS);

@@ -122,6 +122,43 @@
     };
   }
 
+  // 路感比依時速分段統計（km/h）：車速越快路面高頻輸入越多，跨車速比較會失真
+  const SPEED_BANDS = [
+    { label: '0–30', from: 0, to: 30 },
+    { label: '30–60', from: 30, to: 60 },
+    { label: '60 以上', from: 60, to: Infinity },
+  ];
+  // GPS 超過這麼久沒更新就當作不知道時速
+  const GPS_STALE_MS = 3000;
+  const GPS_STRIDE = 2; // 錄製的 GPS 軌跡每筆：時間(ms，與感測資料同一時間軸)、時速(m/s)
+
+  function speedBand(kmh) {
+    if (kmh == null || !isFinite(kmh)) return -1;
+    return SPEED_BANDS.findIndex((b) => kmh >= b.from && kmh < b.to);
+  }
+
+  function emptyRide() {
+    const o = {};
+    for (const c of CORNERS) o[c] = { lo2: 0, hi2: 0, n: 0, wLo2: 0, wHi2: 0 };
+    return o;
+  }
+
+  // 依時間取 GPS 時速（沿用最近一筆；太舊就回 null）。時間需遞增查詢。
+  class SpeedTrack {
+    constructor(gps) {
+      this.g = gps && gps.length >= GPS_STRIDE ? gps : null;
+      this.i = -1;
+    }
+    at(t) {
+      const g = this.g;
+      if (!g) return null;
+      while (this.i + 1 < g.length / GPS_STRIDE && g[(this.i + 1) * GPS_STRIDE] <= t) this.i++;
+      if (this.i < 0) return null;
+      const o = this.i * GPS_STRIDE;
+      return t - g[o] <= GPS_STALE_MS ? g[o + 1] : null;
+    }
+  }
+
   class Processor {
     // calib: { R, gMag, gyroBias:[alpha,beta,gamma], hasGyro }
     // settings: 幾何、翻轉、陀螺儀軸對應、rideGate…
@@ -159,10 +196,9 @@
       this.pPrev = 0; this.qPrev = 0; this.zPrev = 0;
       this.gateMs = 0;
       this.grad = { dive: new Gradient(), squat: new Gradient(), rollL: new Gradient(), rollR: new Gradient() };
-      this.ride = {};
-      for (const c of CORNERS) {
-        this.ride[c] = { lo2: 0, hi2: 0, n: 0, wLo2: 0, wHi2: 0 };
-      }
+      this.ride = emptyRide();
+      this.rideBands = SPEED_BANDS.map(emptyRide);
+      this.speedMax = null;
       this.count = 0;
       this.duration = 0;
     }
@@ -170,11 +206,14 @@
     // 只清統計，保留濾波器/角度狀態（給「重設統計」按鈕用）
     resetStats() {
       for (const k of Object.keys(this.grad)) this.grad[k] = new Gradient();
-      for (const c of CORNERS) this.ride[c] = { lo2: 0, hi2: 0, n: 0, wLo2: 0, wHi2: 0 };
+      this.ride = emptyRide();
+      this.rideBands = SPEED_BANDS.map(emptyRide);
+      this.speedMax = null;
       this.duration = 0;
     }
 
-    step(t, ax, ay, az, ra, rb, rg) {
+    // speed：GPS 時速 m/s，不知道就給 null
+    step(t, ax, ay, az, ra, rb, rg, speed) {
       const dt = this.tPrev == null ? 1 / this.fs : Math.min(0.1, Math.max(0.001, (t - this.tPrev) / 1000));
       this.tPrev = t;
       this.count++;
@@ -242,6 +281,9 @@
       this.gateMs += (gateSum / 4 - this.gateMs) * Math.min(1, dt / 1);
       const moving = warm && Math.sqrt(this.gateMs) > this.s.rideGate;
       const kw = Math.min(1, dt / 4);
+      const kmh = speed != null && isFinite(speed) && speed >= 0 ? speed * 3.6 : null;
+      if (kmh != null) this.speedMax = Math.max(this.speedMax || 0, kmh);
+      const band = speedBand(kmh);
       for (const c of CORNERS) {
         if (!moving) continue;
         const [lo, hi] = vals[c];
@@ -249,14 +291,23 @@
         st.lo2 += lo * lo; st.hi2 += hi * hi; st.n++;
         st.wLo2 += (lo * lo - st.wLo2) * kw;
         st.wHi2 += (hi * hi - st.wHi2) * kw;
+        if (band >= 0) {
+          const sb = this.rideBands[band][c];
+          sb.lo2 += lo * lo; sb.hi2 += hi * hi; sb.n++;
+        }
       }
 
       return {
         t, axg, ayg, pitchDeg, rollDeg,
         yawDeg: r * DEG,
+        speedKmh: kmh,
         moving,
         hasGyro,
       };
+    }
+
+    rideRatio(st) {
+      return st.n >= this.minN && st.lo2 > 0 ? Math.sqrt(st.hi2 / st.lo2) : null;
     }
 
     metrics() {
@@ -266,11 +317,19 @@
         ride[c] = {
           lo: st.n ? Math.sqrt(st.lo2 / st.n) : null,
           hi: st.n ? Math.sqrt(st.hi2 / st.n) : null,
-          ratio: st.n >= this.minN && st.lo2 > 0 ? Math.sqrt(st.hi2 / st.lo2) : null,
+          ratio: this.rideRatio(st),
           live: st.wLo2 > 0 ? Math.sqrt(st.wHi2 / st.wLo2) : null,
           seconds: st.n / this.fs,
         };
       }
+      const rideBands = SPEED_BANDS.map((b, i) => {
+        const corners = {};
+        for (const c of CORNERS) {
+          const st = this.rideBands[i][c];
+          corners[c] = { ratio: this.rideRatio(st), seconds: st.n / this.fs };
+        }
+        return { label: b.label, from: b.from, to: b.to, corners };
+      });
       const g = this.grad;
       return {
         dive: g.dive.value(this.minN),
@@ -282,9 +341,30 @@
           rollL: g.rollL.n / this.fs, rollR: g.rollR.n / this.fs,
         },
         ride,
+        rideBands,
+        speedMax: this.speedMax,
         duration: this.duration,
       };
     }
+  }
+
+  // 路感比與基準比較：兩邊都有 GPS 時，只比同一時速段，再依這次各段的秒數加權；
+  // 沒有共同時速段時退回整體比值（matched = false）。回傳「變硬多少 %」。
+  function compareRide(cur, base, corner) {
+    if (!cur || !base) return null;
+    if (cur.rideBands && base.rideBands) {
+      let wSum = 0, pSum = 0;
+      cur.rideBands.forEach((b, i) => {
+        const a = b.corners[corner], z = base.rideBands[i] && base.rideBands[i].corners[corner];
+        if (!a || !z || a.ratio == null || z.ratio == null || z.ratio === 0) return;
+        wSum += a.seconds;
+        pSum += a.seconds * (a.ratio / z.ratio - 1) * 100;
+      });
+      if (wSum > 0) return { pct: pSum / wSum, matched: true };
+    }
+    const a = cur.ride && cur.ride[corner], z = base.ride && base.ride[corner];
+    const pct = vsBaseline(a && a.ratio, z && z.ratio, false);
+    return pct == null ? null : { pct, matched: false };
   }
 
   // 依「越小越硬」或「越大越硬」換成 0(軟)…1(硬)
@@ -323,20 +403,23 @@
   }
 
   // 跑完整段錄製，回傳最終統計與每點的時間序列（給回放圖表）
-  function analyzeRecording(samples, calib, settings, fs) {
+  // gps：錄製的時速軌跡（GPS_STRIDE 一筆），沒有就給 null
+  function analyzeRecording(samples, calib, settings, fs, gps) {
     const proc = new Processor(calib, settings, fs);
+    const speeds = new SpeedTrack(gps);
     const n = Math.floor(samples.length / STRIDE);
     const series = {
       t: new Float32Array(n), axg: new Float32Array(n), ayg: new Float32Array(n),
-      pitch: new Float32Array(n), roll: new Float32Array(n),
+      pitch: new Float32Array(n), roll: new Float32Array(n), speed: new Float32Array(n),
     };
     for (let i = 0; i < n; i++) {
       const o = i * STRIDE;
       const st = proc.step(samples[o], samples[o + 1], samples[o + 2], samples[o + 3],
-        samples[o + 4], samples[o + 5], samples[o + 6]);
+        samples[o + 4], samples[o + 5], samples[o + 6], speeds.at(samples[o]));
       series.t[i] = samples[o];
       series.axg[i] = st.axg; series.ayg[i] = st.ayg;
       series.pitch[i] = st.pitchDeg; series.roll[i] = st.rollDeg;
+      series.speed[i] = st.speedKmh == null ? NaN : st.speedKmh;
     }
     return { metrics: proc.metrics(), series };
   }
@@ -411,8 +494,10 @@
 
   return {
     G, STRIDE, GATE, CORNERS, FORWARD_PRESETS, RIDE_LO, RIDE_HI,
+    SPEED_BANDS, GPS_STALE_MS, GPS_STRIDE,
     buildFrame, toCar, gyroDevice, cornerOffsets,
-    Biquad, Processor, ForwardDetector,
-    hardness, vsBaseline, gyroCheck, analyzeRecording, staticCalibration, estimateFs,
+    Biquad, Processor, ForwardDetector, SpeedTrack,
+    hardness, vsBaseline, compareRide, speedBand,
+    gyroCheck, analyzeRecording, staticCalibration, estimateFs,
   };
 });

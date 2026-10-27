@@ -45,9 +45,9 @@
     const seconds = opts.seconds || 61;
     const car = { ...DEFAULT_CAR, ...(opts.car || {}) };
     const rnd = rng(opts.seed || 7);
-    const speed = 15; // m/s，只用來算偏航角速度
     const n = Math.round(seconds * fs);
     const out = new Float32Array(n * A.STRIDE);
+    const gps = [];
     const dt = 1 / fs;
     let pitch = 0, roll = 0, pPrev = 0, rPrev = 0;
     for (let i = 0; i < n; i++) {
@@ -57,21 +57,27 @@
         const k = smooth(t, t0, t1);
         ax += gx * k; ay += gy * k;
       }
-      const moving = t > 2.6;
+      const kmh = speedAt(t);
+      const v = kmh / 3.6;
+      // GPS 一秒一筆
+      if (i % fs === 0) gps.push(t * 1000, v);
+      const moving = kmh > 3;
+      // 車速越快，路面傳上來的高頻震動越大
+      const road = 0.5 + kmh / 80;
       const tp = ax < 0 ? car.dive * -ax : -car.squat * ax;
       const tr = ay > 0 ? car.rollL * ay : car.rollR * ay;
       pitch += (tp / DEG - pitch) * dt / 0.12;
       roll += (tr / DEG - roll) * dt / 0.12;
       // 路面：車身起伏（低頻）＋ 路面細震（高頻），前輪較硬、後輪較軟
       const heave = moving ? 0.55 * Math.sin(2 * Math.PI * 1.25 * t) + 0.25 * Math.sin(2 * Math.PI * 0.8 * t + 1) : 0;
-      const hiZ = moving ? 0.69 * Math.sin(2 * Math.PI * 9 * t) : 0;
-      const pOsc = moving ? 0.00004 * Math.sin(2 * Math.PI * 9 * t) + 0.0012 * Math.sin(2 * Math.PI * 1.6 * t) : 0;
+      const hiZ = moving ? road * 0.69 * Math.sin(2 * Math.PI * 9 * t) : 0;
+      const pOsc = moving ? road * 0.00004 * Math.sin(2 * Math.PI * 9 * t) + 0.0012 * Math.sin(2 * Math.PI * 1.6 * t) : 0;
       const rOsc = moving ? 0.0003 * Math.sin(2 * Math.PI * 7 * t) : 0;
       const pAng = pitch + pOsc, rAng = roll + rOsc;
       const q = i ? (pAng - pPrev) / dt : 0;
       const p = i ? (rAng - rPrev) / dt : 0;
       pPrev = pAng; rPrev = rAng;
-      const r = moving ? ay * G / speed : 0;
+      const r = moving ? ay * G / Math.max(v, 3) : 0;
       const f = [
         ax * G - G * Math.sin(pAng) + rnd() * 0.08,
         ay * G + G * Math.sin(rAng) + rnd() * 0.08,
@@ -85,7 +91,23 @@
       R: A.buildFrame(toDevice([0, 0, G]), A.FORWARD_PRESETS.facingDriver),
       gMag: G, gyroBias: [0, 0, 0], hasGyro: true, fs, created: 0,
     };
-    return { samples: out, calib, fs, car };
+    return { samples: out, gps: Float32Array.from(gps), calib, fs, car };
+  }
+
+  // 示範路線的時速（km/h），關鍵點之間線性內插
+  const SPEED_POINTS = [
+    [0, 0], [3, 0], [7, 45], [10, 45], [13, 22], [16, 25], [29, 28], [33, 40],
+    [36, 20], [39, 30], [42, 72], [61, 72],
+  ];
+  function speedAt(t) {
+    for (let i = 1; i < SPEED_POINTS.length; i++) {
+      const [t1, v1] = SPEED_POINTS[i];
+      if (t <= t1) {
+        const [t0, v0] = SPEED_POINTS[i - 1];
+        return v0 + (v1 - v0) * (t - t0) / (t1 - t0);
+      }
+    }
+    return SPEED_POINTS[SPEED_POINTS.length - 1][1];
   }
 
   return { simulateDrive, DEFAULT_CAR };
