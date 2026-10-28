@@ -85,6 +85,13 @@
         </table>
       </div>
 
+      <div id="mountCard" class="card hidden">
+        <h3 class="card-title">支架穩定度</h3>
+        <div id="mountText" class="mount"></div>
+        <canvas id="mountCanvas" class="spectrum"></canvas>
+        <p class="muted small">陀螺儀在各頻率的晃動能量（行駛中平均）。尖峰 = 手機＋支架的共振，紅色區段是路感比排除的頻段。換支架或位置後各錄一段，比較晃動比就知道哪個比較穩。</p>
+      </div>
+
       <div id="bandsCard" class="card hidden">
         <h3 class="card-title">路感比・依 GPS 時速分段</h3>
         <p class="muted small">車速越快，路面傳上來的高頻震動越多。比較兩段紀錄時，請看同一個時速段。<span id="speedMax"></span></p>
@@ -133,6 +140,7 @@
         <p class="muted small">路感比沒有固定門檻：沒設基準時跟這次四輪的平均比較，設了基準就跟基準比較。</p>
         <label>行駛判定門檻 (m/s² RMS)<input name="rideGate" type="number" step="0.01"></label>
         <label class="check"><input name="useBaseline" type="checkbox">與基準紀錄比較（取代門檻）</label>
+        <label class="check"><input name="avoidResonance" type="checkbox">路感比自動避開支架共振頻段（建議開）</label>
 
         <h3>方向修正（裝置差異用）</h3>
         <label>陀螺儀軸對應
@@ -180,6 +188,7 @@
           <li>一支手機只有一個量測點；四輪的垂直加速度是用陀螺儀的俯仰/側傾角加速度做剛體推算，不是四個真的感測器。</li>
           <li>點頭/蹲尾也受懸吊幾何（anti-dive / anti-squat）、煞車配比、驅動方式影響，不只是彈簧阻尼。</li>
           <li>手機在支架上的高頻晃動比車身擺動大很多，所以四輪只推算低頻的車身擺動；高頻路面震動四輪共用手機位置的實測值。</li>
+          <li><b>支架共振</b>：行駛中 App 會找出手機＋支架的共振頻率（實車測試是 12.5 Hz），並在路感比排除前後 1.5 Hz。共振頻率若剛好是輪胎本身的共振（一般 10–15 Hz），那段資訊也會一起被排除。晃動比的「穩／普通／晃」分級是參考值，<b>未驗證</b>。</li>
           <li>坡道、路面起伏會混進姿態；請在平路比較。</li>
           <li>判讀門檻的預設值是經驗值，<b>未驗證</b>。最可靠的用法是：調整前錄一段 → 設為基準 → 調整後同一路線再錄 → 開「與基準比較」。</li>
           <li>不同手機的陀螺儀軸定義可能不同（未驗證每款手機）。紀錄詳情裡的「陀螺儀軸檢查」會告訴你哪個對應比較合理。</li>

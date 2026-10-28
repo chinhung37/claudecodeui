@@ -320,3 +320,60 @@ test('gyroCheck 在規範軸對應下呈強正相關', () => {
   assert.ok(c.spec > 0.9, `spec=${c.spec}`);
   assert.ok(c.alt == null || c.alt < 0.5, `alt=${c.alt}`);
 });
+
+// 行駛中的寬頻路面震動（加上可選的支架共振）。mountHz = null 表示沒有共振。
+function simulateMount(mountHz, fs = 60, seconds = 60) {
+  let seed = 11;
+  const rnd = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296 - 0.5; };
+  const out = [];
+  for (let i = 0; i < seconds * fs; i++) {
+    const t = i / fs;
+    const wob = mountHz ? Math.sin(2 * Math.PI * mountHz * t) : 0;
+    const z = 0.5 * Math.sin(2 * Math.PI * 1.2 * t) + rnd() * 1.2 + 0.6 * wob;
+    const f = toDevice(R_TRUE, [rnd() * 0.3, rnd() * 0.3, G + z]);
+    const w = [0, 1, 2].map((k) => rnd() * 1.5 + 6 * wob * [1, 0.8, 0.9][k]);
+    out.push(t * 1000, f[0], f[1], f[2], w[0], w[1], w[2]);
+  }
+  return Float64Array.from(out);
+}
+
+test('支架共振偵測：找出 12.5 Hz 的共振並量出晃動比', () => {
+  const r = A.analyzeRecording(simulateMount(12.5), calibFor(R_TRUE), { ...SETTINGS, gyroAxes: 'spec' }, 60);
+  const m = r.metrics.mount;
+  assert.equal(m.detected, true);
+  assert.ok(Math.abs(m.peakHz - 12.5) < 0.3, `peak=${m.peakHz}`);
+  assert.ok(m.prominence >= A.MOUNT_MIN_PROM);
+  assert.ok(m.ratio > 1, `晃動比 ${m.ratio}`);
+  assert.ok(Math.abs(r.notchHz - 12.5) < 0.3, '回放時會整段避開這個頻率');
+});
+
+test('只有寬頻路面震動、沒有共振時不誤判', () => {
+  const r = A.analyzeRecording(simulateMount(null), calibFor(R_TRUE), { ...SETTINGS, gyroAxes: 'spec' }, 60);
+  assert.equal(r.metrics.mount.detected, false, `prominence=${r.metrics.mount.prominence}`);
+  assert.equal(r.notchHz, null);
+});
+
+test('避開共振：高頻路面震動只扣掉共振那一段，關掉時不變', () => {
+  const s = simulateMount(12.5);
+  const on = A.analyzeRecording(s, calibFor(R_TRUE), { ...SETTINGS, gyroAxes: 'spec' }, 60).metrics.ride.FL.hi;
+  const off = A.analyzeRecording(s, calibFor(R_TRUE), { ...SETTINGS, gyroAxes: 'spec', avoidResonance: false }, 60).metrics.ride.FL.hi;
+  const clean = A.analyzeRecording(simulateMount(null), calibFor(R_TRUE), { ...SETTINGS, gyroAxes: 'spec' }, 60).metrics.ride.FL.hi;
+  assert.ok(on < off * 0.9, `避開 ${on} 應小於不避開 ${off}`);
+  // 避開後應接近沒有共振時的值（寬頻震動只少了 3 Hz 寬的一段）
+  assert.ok(Math.abs(on - clean) / clean < 0.15, `避開 ${on} ≈ 無共振 ${clean}`);
+});
+
+test('即時模式：偵測到共振後自動換上濾波，並清掉之前混了共振的路感統計', () => {
+  const s = simulateMount(12.5);
+  const p = new A.Processor(calibFor(R_TRUE), { ...SETTINGS, gyroAxes: 'spec' }, 60);
+  let switchedAt = null;
+  for (let o = 0; o < s.length; o += A.STRIDE) {
+    p.step(s[o], s[o + 1], s[o + 2], s[o + 3], s[o + 4], s[o + 5], s[o + 6], null);
+    if (switchedAt == null && p.notchHz != null) switchedAt = s[o] / 1000;
+  }
+  const m = p.metrics();
+  assert.ok(switchedAt != null && switchedAt < 30, `應在 30 秒內偵測到，實際 ${switchedAt}`);
+  assert.ok(Math.abs(m.mount.notchHz - 12.5) < 0.3);
+  // 路感統計是從換上濾波後才開始累積的
+  assert.ok(m.ride.FL.seconds < 60 - switchedAt + 1, `ride 秒數 ${m.ride.FL.seconds}`);
+});
