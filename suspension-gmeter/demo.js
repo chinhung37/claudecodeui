@@ -18,6 +18,9 @@
     [33, 36, -0.4, 0], [39, 42, 0.25, 0], [45, 50, 0, 0.4], [53, 58, 0, -0.4],
   ];
   const DEFAULT_CAR = { dive: 3.2, squat: 1.4, rollL: 6.5, rollR: 3.9 };
+  // 路面高頻成分（Hz、相位）與手機支架共振頻率
+  const ROAD_TONES = [[5.2, 0.3], [6.7, 1.9], [8.1, 4.0], [9.6, 2.2], [11.0, 5.1], [14.3, 0.7]];
+  const MOUNT_HZ = 12.5;
 
   function toDevice(v) {
     return [0, 1, 2].map((k) => R_DEV[0][k] * v[0] + R_DEV[1][k] * v[1] + R_DEV[2][k] * v[2]);
@@ -68,13 +71,16 @@
       const tr = ay > 0 ? car.rollL * ay : car.rollR * ay;
       pitch += (tp / DEG - pitch) * dt / 0.12;
       roll += (tr / DEG - roll) * dt / 0.12;
-      // 路面：車身起伏（低頻）＋ 路面細震（高頻）
+      // 路面：車身起伏（低頻）＋ 路面細震（高頻，分散在 5–14 Hz 多個頻率）
       const heave = moving ? 0.55 * Math.sin(2 * Math.PI * 1.25 * t) + 0.25 * Math.sin(2 * Math.PI * 0.8 * t + 1) : 0;
-      const hiZ = moving ? road * 0.69 * Math.sin(2 * Math.PI * 9 * t) : 0;
-      // 車身俯仰擺動（1.6 Hz）讓後軸上下動得比前軸多 = 後軟；9 Hz 是手機在支架上的小晃動
-      const pOsc = moving ? road * 0.00004 * Math.sin(2 * Math.PI * 9 * t) + 0.004 * Math.sin(2 * Math.PI * 1.6 * t) : 0;
-      const rOsc = moving ? 0.0003 * Math.sin(2 * Math.PI * 7 * t) : 0;
-      const pAng = pitch + pOsc, rAng = roll + rOsc;
+      let hiZ = 0;
+      if (moving) for (const [hz, ph] of ROAD_TONES) hiZ += road * 0.28 * Math.sin(2 * Math.PI * hz * t + ph);
+      // 手機＋支架在 12.5 Hz 共振：垂直多一份震動，陀螺儀三軸都在晃（跟實車資料的現象一樣）
+      const wob = moving ? road * Math.sin(2 * Math.PI * MOUNT_HZ * t) : 0;
+      hiZ += 0.4 * wob;
+      // 車身俯仰擺動（1.6 Hz）讓後軸上下動得比前軸多 = 後軟
+      const pOsc = moving ? 0.004 * Math.sin(2 * Math.PI * 1.6 * t) : 0;
+      const pAng = pitch + pOsc, rAng = roll;
       const q = i ? (pAng - pPrev) / dt : 0;
       const p = i ? (rAng - rPrev) / dt : 0;
       pPrev = pAng; rPrev = rAng;
@@ -85,7 +91,7 @@
         G * Math.cos(pAng) * Math.cos(rAng) + heave + hiZ + rnd() * 0.08,
       ];
       const acc = toDevice(f);
-      const w = toDevice([p, q, r]).map((x) => x * DEG + rnd() * 0.15);
+      const w = toDevice([p, q, r]).map((x, k) => x * DEG + 7 * wob * [1, 0.8, 0.9][k] + rnd() * 0.15);
       out.set([t * 1000, acc[0], acc[1], acc[2], w[2], w[0], w[1]], i * A.STRIDE);
     }
     const calib = {

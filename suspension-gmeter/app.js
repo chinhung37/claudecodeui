@@ -10,12 +10,12 @@
     rollSoft: 6, rollHard: 2, pitchSoft: 4, pitchHard: 1.5,
     rideGate: 0.2,
     // 舊版存的 gyroMap 不再使用：各手機不同，改成預設自動判斷
-    useBaseline: false, gyroAxes: 'auto',
+    useBaseline: false, gyroAxes: 'auto', avoidResonance: true,
     flipLong: false, flipLat: false, flipPitch: false, flipRoll: false,
   };
   const NUM_KEYS = ['wheelbase', 'trackF', 'trackR', 'phoneX', 'phoneY', 'rollSoft', 'rollHard',
     'pitchSoft', 'pitchHard', 'rideGate'];
-  const BOOL_KEYS = ['useBaseline', 'flipLong', 'flipLat', 'flipPitch', 'flipRoll'];
+  const BOOL_KEYS = ['useBaseline', 'avoidResonance', 'flipLong', 'flipLat', 'flipPitch', 'flipRoll'];
   const CORNER_NAME = { FL: '前左', FR: '前右', RL: '後左', RR: '後右' };
 
   // ---------- 本機儲存（設定、校正、基準是個人便利資料） ----------
@@ -662,6 +662,7 @@
     rows.push(axesRow(m));
     $('#metricsBody').innerHTML = rows.join('');
     drawBands(m);
+    drawMount(m && m.mount);
   }
   // 陀螺儀軸對應的判斷狀態，以及傾角不合理被重設的次數
   function axesRow(m) {
@@ -681,6 +682,71 @@
     return `<tr><td>${name}</td><td class="num">${val}</td>` +
       `<td><span class="tag" style="background:${levelColor(j)}">${j.text}</span>${note}</td>` +
       `<td class="num">${(sec || 0).toFixed(0)}s</td></tr>`;
+  }
+
+  // 支架晃動比（陀螺儀 4–15 Hz ÷ 0.5–3 Hz）的參考分級，未驗證：
+  // 實車（中華 J SPACE、一般手機支架）量到 4.0，只有這一筆資料
+  const MOUNT_LEVELS = [
+    { max: 1.5, text: '穩', color: '#16c060' },
+    { max: 3, text: '普通', color: '#e0a526' },
+    { max: Infinity, text: '晃', color: '#ff3b30' },
+  ];
+
+  function drawMount(mt) {
+    const card = $('#mountCard');
+    if (!mt) { card.classList.add('hidden'); return; }
+    card.classList.remove('hidden');
+    const lv = mt.ratio != null ? MOUNT_LEVELS.find((x) => mt.ratio < x.max) : null;
+    const res = mt.detected
+      ? `共振 <b>${mt.peakHz.toFixed(1)} Hz</b>（比周圍強 ${Math.round(mt.prominence)} 倍）`
+      : mt.segs >= A.MOUNT_MIN_SEGS ? '沒有明顯共振' : `偵測中（需要約 15 秒行駛，已 ${mt.seconds.toFixed(0)} 秒）`;
+    const notch = mt.notchHz != null
+      ? `路感比已避開 ${(mt.notchHz - A.NOTCH_WIDTH / 2).toFixed(1)}–${(mt.notchHz + A.NOTCH_WIDTH / 2).toFixed(1)} Hz`
+      : settings.avoidResonance ? '路感比：偵測到共振後會自動避開' : '路感比：避開共振已關閉';
+    $('#mountText').innerHTML =
+      `<div class="mount-row"><span>晃動比</span><b class="big">${mt.ratio != null ? mt.ratio.toFixed(1) : '—'}</b>` +
+      (lv ? `<span class="tag" style="background:${lv.color}">${lv.text}</span>` : '') + '</div>' +
+      `<div class="muted small">支架晃動 ${fmt(mt.wobble, 1)}°/s ÷ 車身擺動 ${fmt(mt.body, 1)}°/s（越低越穩；分級為參考，未驗證）</div>` +
+      `<div>${res}</div><div class="muted small">${notch}</div>`;
+    drawMountChart(mt);
+  }
+
+  // 頻譜：陀螺儀能量（對數刻度），共振頻段塗色。左邊低頻、右邊高頻
+  function drawMountChart(mt) {
+    const { ctx, w, h } = fitCanvas($('#mountCanvas'));
+    if (w < 80) return;
+    ctx.clearRect(0, 0, w, h);
+    const sp = mt.spectrum.filter((x) => x.gyro > 0);
+    if (sp.length < 3) return;
+    const padL = 10, padR = 10, padT = 10, padB = 30;
+    const f0 = sp[0].hz, f1 = sp[sp.length - 1].hz;
+    const tx = (f) => padL + (f - f0) / (f1 - f0) * (w - padL - padR);
+    const logs = sp.map((x) => Math.log10(x.gyro));
+    const lo = Math.min(...logs), hi = Math.max(...logs);
+    const ty = (v) => padT + (1 - (v - lo) / (hi - lo || 1)) * (h - padT - padB);
+    if (mt.notchHz != null) {
+      ctx.fillStyle = 'rgba(255,59,48,0.22)';
+      const a = tx(mt.notchHz - A.NOTCH_WIDTH / 2), b = tx(mt.notchHz + A.NOTCH_WIDTH / 2);
+      ctx.fillRect(a, padT, b - a, h - padT - padB);
+    }
+    ctx.strokeStyle = '#4cc9f0';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    sp.forEach((x, i) => (i ? ctx.lineTo(tx(x.hz), ty(logs[i])) : ctx.moveTo(tx(x.hz), ty(logs[i]))));
+    ctx.stroke();
+    ctx.fillStyle = '#98a2ae';
+    ctx.font = '500 14px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'alphabetic';
+    for (let f = Math.ceil(f0 / 2) * 2; f <= f1; f += 2) ctx.fillText(`${f}`, tx(f), h - 10);
+    ctx.textAlign = 'right';
+    ctx.fillText('Hz', w - padR, h - 10);
+    if (mt.detected) {
+      ctx.fillStyle = '#ff8a80';
+      ctx.font = '700 15px system-ui, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(`${mt.peakHz.toFixed(1)} Hz`, Math.min(w - 40, Math.max(40, tx(mt.peakHz))), padT + 14);
+    }
   }
 
   // 路感比依 GPS 時速分段：每一格是比值，下方小字是秒數
@@ -746,8 +812,9 @@
     const samples = new Float32Array(data.samples);
     const track = gpsOf(data);
     const res = A.analyzeRecording(samples, data.calib, settings, meta.fs, track);
+    // 回放用整段掃出的共振頻率，從頭就避開
     pb = {
-      meta, calib: data.calib, samples, track, series: res.series,
+      meta, calib: data.calib, samples, track, series: res.series, notchHz: res.notchHz,
       n: samples.length / STRIDE,
       duration: samples[samples.length - STRIDE],
       t: 0, idx: 0, proc: null, state: null, playing: false, speed: Number($('#playSpeed').value),
@@ -766,7 +833,7 @@
     seek(meta.demo ? pb.duration : 0, true);
   }
   function resetPbProc() {
-    pb.proc = new A.Processor(pb.calib, settings, pb.meta.fs);
+    pb.proc = new A.Processor(pb.calib, { ...settings, notchHz: pb.notchHz }, pb.meta.fs);
     pb.speeds = new A.SpeedTrack(pb.track);
     pb.idx = 0;
     pb.state = null;
@@ -917,6 +984,7 @@
           點頭 ${fmt(x.dive, 2)}・蹲尾 ${fmt(x.squat, 2)}・左彎側傾 ${fmt(x.rollL, 2)}・右彎側傾 ${fmt(x.rollR, 2)} °/g<br>
           路感比 前左 ${fmt(x.ride && x.ride.FL.ratio, 2)}・前右 ${fmt(x.ride && x.ride.FR.ratio, 2)}・後左 ${fmt(x.ride && x.ride.RL.ratio, 2)}・後右 ${fmt(x.ride && x.ride.RR.ratio, 2)}
           ${gcText ? '<br>' + gcText : ''}
+          ${x.mount && x.mount.ratio != null ? `<br>支架：晃動比 ${x.mount.ratio.toFixed(1)}${x.mount.detected ? `・共振 ${x.mount.peakHz.toFixed(1)} Hz` : '・無明顯共振'}` : ''}
         </div>
         <div class="controls">
           <button data-act="play" class="primary">回放</button>
@@ -1100,6 +1168,7 @@
     if (pb) {
       const res = A.analyzeRecording(pb.samples, pb.calib, settings, pb.meta.fs, pb.track);
       pb.series = res.series;
+      pb.notchHz = res.notchHz;
       seek(pb.t, true);
     }
   }

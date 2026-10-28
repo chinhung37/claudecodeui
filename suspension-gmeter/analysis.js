@@ -74,13 +74,15 @@
 
   // 二階 Butterworth（RBJ biquad）
   class Biquad {
-    constructor(type, fc, fs) {
+    // type：'lp' 低通、'hp' 高通（Butterworth）、'notch' 帶阻（q = 中心頻率 ÷ 頻寬）
+    constructor(type, fc, fs, q = Math.SQRT1_2) {
       const f = Math.min(fc, fs * 0.45);
       const w0 = 2 * Math.PI * f / fs;
       const cw = Math.cos(w0);
-      const alpha = Math.sin(w0) / (2 * Math.SQRT1_2);
+      const alpha = Math.sin(w0) / (2 * q);
       let b0, b1, b2;
       if (type === 'lp') { b0 = (1 - cw) / 2; b1 = 1 - cw; b2 = b0; }
+      else if (type === 'notch') { b0 = 1; b1 = -2 * cw; b2 = 1; }
       else { b0 = (1 + cw) / 2; b1 = -(1 + cw); b2 = b0; }
       const a0 = 1 + alpha;
       this.b0 = b0 / a0; this.b1 = b1 / a0; this.b2 = b2 / a0;
@@ -222,6 +224,117 @@
     }
   }
 
+  // 支架共振偵測：行駛中把陀螺儀與垂直加速度切成約 4 秒一段做頻譜（Welch 平均），
+  // 找 4–15 Hz 內陀螺儀能量的尖峰。實車資料（中華 J SPACE、支架裝前方）行駛中陀螺儀三軸
+  // 與垂直加速度都在 12–14 Hz 出現同一個尖峰，車身本身不會三個方向同頻轉動，判斷是手機＋支架的共振。
+  const MOUNT_BAND = [4, 15];
+  const MOUNT_MIN_SEGS = 6; // 至少 6 段（約 13 秒行駛）才下判斷
+  const MOUNT_MIN_PROM = 4; // 尖峰能量 ≥ 4 倍中位數才算明顯共振
+  const NOTCH_WIDTH = 3; // 避開共振時排除的頻寬（Hz），約 ±1.5 Hz
+
+  class MountMeter {
+    constructor(fs) {
+      this.fs = fs;
+      this.N = Math.max(64, Math.round(fs * 4));
+      this.hop = Math.round(this.N / 2);
+      this.df = fs / this.N;
+      const kLo = Math.max(1, Math.ceil(3 / this.df));
+      const kHi = Math.min(Math.floor(this.N / 2) - 1, Math.floor(Math.min(16, fs * 0.45) / this.df));
+      this.ks = [];
+      for (let k = kLo; k <= kHi; k++) this.ks.push(k);
+      // 預先算好 Hann 窗與各頻率的 cos/sin
+      this.win = Float64Array.from({ length: this.N }, (_, t) => 0.5 - 0.5 * Math.cos(2 * Math.PI * t / (this.N - 1)));
+      this.cos = this.ks.map((k) => Float64Array.from({ length: this.N }, (_, t) => Math.cos(2 * Math.PI * k * t / this.N)));
+      this.sin = this.ks.map((k) => Float64Array.from({ length: this.N }, (_, t) => Math.sin(2 * Math.PI * k * t / this.N)));
+      this.buf = [0, 1, 2, 3].map(() => new Float64Array(this.N)); // 垂直加速度、陀螺儀三軸
+      this.pos = 0;
+      this.run = 0;
+      this.sinceHop = 0;
+      this.psdZ = new Float64Array(this.ks.length);
+      this.psdG = new Float64Array(this.ks.length);
+      this.segs = 0;
+      // 時域：陀螺儀高頻（支架晃動）與低頻（車身擺動）的 RMS
+      this.hiF = [0, 1, 2].map(() => new Band(MOUNT_BAND[0], MOUNT_BAND[1], fs));
+      this.loF = [0, 1, 2].map(() => new Band(RIDE_LO[0], RIDE_LO[1], fs));
+      this.hi2 = 0; this.lo2 = 0; this.n = 0;
+    }
+
+    // z：垂直加速度 m/s²；d：陀螺儀三軸 deg/s（已扣零點）；moving：是否在行駛。
+    // 剛分析完一段時回傳 true。
+    add(z, d, moving) {
+      let hi = 0, lo = 0;
+      for (let k = 0; k < 3; k++) {
+        hi += this.hiF[k].step(d[k]) ** 2;
+        lo += this.loF[k].step(d[k]) ** 2;
+      }
+      if (!moving) { this.run = 0; return false; }
+      this.hi2 += hi; this.lo2 += lo; this.n++;
+      this.buf[0][this.pos] = z;
+      for (let k = 0; k < 3; k++) this.buf[k + 1][this.pos] = d[k];
+      this.pos = (this.pos + 1) % this.N;
+      this.run++;
+      this.sinceHop++;
+      if (this.run < this.N || this.sinceHop < this.hop) return false;
+      this.sinceHop = 0;
+      this.analyze();
+      return true;
+    }
+
+    analyze() {
+      const N = this.N;
+      for (let c = 0; c < 4; c++) {
+        // 依時間順序取出這一段，扣平均
+        const seg = new Float64Array(N);
+        let mean = 0;
+        for (let t = 0; t < N; t++) { seg[t] = this.buf[c][(this.pos + t) % N]; mean += seg[t]; }
+        mean /= N;
+        for (let t = 0; t < N; t++) seg[t] = (seg[t] - mean) * this.win[t];
+        const out = c === 0 ? this.psdZ : this.psdG;
+        for (let i = 0; i < this.ks.length; i++) {
+          let re = 0, im = 0;
+          const cs = this.cos[i], sn = this.sin[i];
+          for (let t = 0; t < N; t++) { re += seg[t] * cs[t]; im -= seg[t] * sn[t]; }
+          out[i] += re * re + im * im;
+        }
+      }
+      this.segs++;
+    }
+
+    result() {
+      const f = this.ks.map((k) => k * this.df);
+      const idx = f.map((x, i) => i).filter((i) => f[i] >= MOUNT_BAND[0] && f[i] <= MOUNT_BAND[1]);
+      let peak = null;
+      if (this.segs > 0 && idx.length >= 3) {
+        let best = idx[0];
+        for (const i of idx) if (this.psdG[i] > this.psdG[best]) best = i;
+        const sorted = idx.map((i) => this.psdG[i]).sort((a, b) => a - b);
+        const median = sorted[Math.floor(sorted.length / 2)];
+        // 拋物線內插讓尖峰頻率比格點更準
+        let hz = f[best];
+        if (best > 0 && best < f.length - 1) {
+          const a = this.psdG[best - 1], b = this.psdG[best], c = this.psdG[best + 1];
+          const den = a - 2 * b + c;
+          if (den !== 0) hz += Math.max(-0.5, Math.min(0.5, 0.5 * (a - c) / den)) * this.df;
+        }
+        peak = { hz, prominence: median > 0 ? this.psdG[best] / median : null };
+      }
+      const wobble = this.n ? Math.sqrt(this.hi2 / this.n) : null;
+      const body = this.n ? Math.sqrt(this.lo2 / this.n) : null;
+      return {
+        segs: this.segs,
+        seconds: this.n / this.fs,
+        peakHz: peak ? peak.hz : null,
+        prominence: peak ? peak.prominence : null,
+        detected: !!peak && this.segs >= MOUNT_MIN_SEGS && peak.prominence >= MOUNT_MIN_PROM,
+        wobble, // 陀螺儀 4–15 Hz RMS（deg/s）＝支架晃動
+        body, // 陀螺儀 0.5–3 Hz RMS（deg/s）＝車身擺動
+        ratio: wobble != null && body > 0 ? wobble / body : null,
+        // 畫圖用：各頻率的陀螺儀與垂直加速度能量（平均）
+        spectrum: f.map((hz, i) => ({ hz, gyro: this.segs ? this.psdG[i] / this.segs : 0, z: this.segs ? this.psdZ[i] / this.segs : 0 })),
+      };
+    }
+  }
+
   class Processor {
     // calib: { R, gMag, gyroBias:[alpha,beta,gamma], hasGyro }
     // settings: 幾何、翻轉、陀螺儀軸對應、rideGate…
@@ -258,6 +371,15 @@
       for (const c of CORNERS) this.bands[c] = new Band(RIDE_LO[0], RIDE_LO[1], fs);
       // 高頻（路面傳入）用手機位置的實測值，四輪共用
       this.hiBand = new Band(RIDE_HI[0], RIDE_HI[1], fs);
+      // 支架共振：偵測後在路面震動裡排除共振頻段（settings.avoidResonance，預設開）。
+      // settings.notchHz 有值時直接用（回放時先整段掃過一次得到的頻率）。
+      this.mount = new MountMeter(fs);
+      this.notchAuto = settings.avoidResonance !== false;
+      this.fixedNotch = settings.notchHz || null;
+      this.notch = null;
+      this.notchHz = null;
+      this.lastMoving = false;
+      if (this.notchAuto && this.fixedNotch) this.setNotch(this.fixedNotch);
       this.reset();
     }
 
@@ -287,6 +409,11 @@
     }
 
     // 只清統計，保留濾波器/角度狀態（給「重設統計」按鈕用）
+    setNotch(hz) {
+      this.notchHz = hz;
+      this.notch = new Biquad('notch', hz, this.fs, hz / NOTCH_WIDTH);
+    }
+
     resetStats() {
       for (const k of Object.keys(this.grad)) this.grad[k] = new Gradient();
       this.ride = emptyRide();
@@ -326,6 +453,16 @@
         const sgn = this.axes.sign;
         const w = toCar(R, gyroDevice(d[0] * sgn, d[1] * sgn, d[2] * sgn, this.axes.mapping));
         p = w[0] * sg.roll; q = w[1] * sg.pitch; r = w[2];
+        // 支架共振偵測（行駛中才算；用上一步的行駛判斷）
+        if (this.mount.add(fz, d, this.lastMoving) && this.notchAuto && this.fixedNotch == null) {
+          const m = this.mount.result();
+          // 第一次偵測到、或共振頻率移動超過 1 Hz：換濾波器，之前混了共振的路感統計清掉重來
+          if (m.detected && (this.notchHz == null || Math.abs(m.peakHz - this.notchHz) > 1)) {
+            this.setNotch(m.peakHz);
+            this.ride = emptyRide();
+            this.rideBands = SPEED_BANDS.map(emptyRide);
+          }
+        }
       }
 
       // 姿態：陀螺儀積分；車身回到「無加減速、無側向 G」時把參考點拉回，消除漂移
@@ -375,7 +512,7 @@
       const dp = (pF - this.pPrev) / dt, dq = (qF - this.qPrev) / dt;
       const zMid = (zF + this.zPrev) / 2;
       this.pPrev = pF; this.qPrev = qF; this.zPrev = zF;
-      const hi = this.hiBand.step(fz);
+      const hi = this.hiBand.step(this.notch ? this.notch.step(fz) : fz);
       const warm = this.count > this.fs * 2;
       let gateSum = 0;
       const vals = {};
@@ -387,6 +524,7 @@
       }
       this.gateMs += (gateSum / 4 - this.gateMs) * Math.min(1, dt / 1);
       const moving = warm && Math.sqrt(this.gateMs) > this.s.rideGate;
+      this.lastMoving = moving;
       const kw = Math.min(1, dt / 4);
       const kmh = speed != null && isFinite(speed) && speed >= 0 ? speed * 3.6 : null;
       if (kmh != null) this.speedMax = Math.max(this.speedMax || 0, kmh);
@@ -458,6 +596,7 @@
         duration: this.duration,
         axes: this.calib.hasGyro ? this.axes : null,
         anomalies: this.anomalies,
+        mount: this.calib.hasGyro ? { ...this.mount.result(), notchHz: this.notchHz } : null,
       };
     }
   }
@@ -518,7 +657,22 @@
 
   // 跑完整段錄製，回傳最終統計與每點的時間序列（給回放圖表）
   // gps：錄製的時速軌跡（GPS_STRIDE 一筆），沒有就給 null
+  // 整段紀錄先掃一次，找出支架共振頻率；沒有明顯共振或關閉避開時回 null
+  function scanNotch(samples, calib, settings, fs, gps) {
+    if (settings.avoidResonance === false || !calib.hasGyro) return null;
+    const proc = new Processor(calib, { ...settings, avoidResonance: false, notchHz: null }, fs);
+    const speeds = new SpeedTrack(gps);
+    for (let o = 0; o + STRIDE <= samples.length; o += STRIDE) {
+      proc.step(samples[o], samples[o + 1], samples[o + 2], samples[o + 3],
+        samples[o + 4], samples[o + 5], samples[o + 6], speeds.at(samples[o]));
+    }
+    const m = proc.mount.result();
+    return m.detected ? m.peakHz : null;
+  }
+
   function analyzeRecording(samples, calib, settings, fs, gps) {
+    // 回放時整段都看得到：先找出共振頻率，第二輪從頭就避開（不用等偵測完才開始）
+    if (settings.notchHz == null) settings = { ...settings, notchHz: scanNotch(samples, calib, settings, fs, gps) };
     const proc = new Processor(calib, settings, fs);
     const speeds = new SpeedTrack(gps);
     const n = Math.floor(samples.length / STRIDE);
@@ -535,7 +689,7 @@
       series.pitch[i] = st.pitchDeg; series.roll[i] = st.rollDeg;
       series.speed[i] = st.speedKmh == null ? NaN : st.speedKmh;
     }
-    return { metrics: proc.metrics(), series };
+    return { metrics: proc.metrics(), series, notchHz: settings.notchHz };
   }
 
   function estimateFs(times) {
@@ -609,6 +763,7 @@
   return {
     G, STRIDE, GATE, CORNERS, FORWARD_PRESETS, RIDE_LO, RIDE_HI,
     SPEED_BANDS, GPS_STALE_MS, GPS_STRIDE, MAX_BODY_DEG, STILL_KMH, PROJ_HZ, MIN_R2,
+    MOUNT_BAND, MOUNT_MIN_SEGS, MOUNT_MIN_PROM, NOTCH_WIDTH, MountMeter, scanNotch,
     buildFrame, toCar, gyroDevice, cornerOffsets,
     Biquad, Processor, ForwardDetector, SpeedTrack,
     hardness, vsBaseline, compareRide, speedBand,
